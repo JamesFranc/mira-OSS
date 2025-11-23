@@ -96,7 +96,7 @@ class HybridEmbeddingsProvider:
     def __init__(self, cache_enabled: bool = True, enable_reranker: bool = True):
         """
         Initialize the hybrid provider with both models.
-        
+
         Args:
             cache_enabled: Whether to enable embedding caching
             enable_reranker: Whether to enable BGE reranker for search refinement
@@ -104,30 +104,37 @@ class HybridEmbeddingsProvider:
         self.logger = logging.getLogger("hybrid_embeddings")
         self.cache_enabled = cache_enabled
         self.enable_reranker = enable_reranker
-        
-        # Load both models immediately
+
+        # Load models based on configuration
         from config.config_manager import config
-        
+
         self.logger.info("Loading AllMiniLM model for real-time operations")
         self.fast_model = get_all_minilm_model(
             model_name=config.embeddings.fast_model.model_name,
             cache_dir=config.embeddings.fast_model.cache_dir,
             thread_limit=config.embeddings.fast_model.thread_limit
         )
-        
-        self.logger.info("Loading OpenAI embeddings for deep understanding")
-        from clients.embeddings.openai_embeddings import OpenAIEmbeddingModel
-        # Use text-embedding-3-small which has 1024 dimensions, same as BGE-M3
-        self.deep_model = OpenAIEmbeddingModel(model="text-embedding-3-small")
-        
+
+        # Initialize deep model only if enabled
+        self.deep_model = None
+        self.openai_embeddings_enabled = config.embeddings.openai_embeddings_enabled
+
+        if self.openai_embeddings_enabled:
+            self.logger.info("Loading OpenAI embeddings for deep understanding")
+            from clients.embeddings.openai_embeddings import OpenAIEmbeddingModel
+            # Use text-embedding-3-small which has 1024 dimensions, same as BGE-M3
+            self.deep_model = OpenAIEmbeddingModel(model="text-embedding-3-small")
+        else:
+            self.logger.info("OpenAI embeddings disabled - deep understanding features unavailable")
+
         # Initialize separate caches for each model with different prefixes
         if cache_enabled:
             self.fast_cache = EmbeddingCache(key_prefix="embedding_384")  # 384-dim cache
-            self.deep_cache = EmbeddingCache(key_prefix="embedding_1024")  # 1024-dim cache
+            self.deep_cache = EmbeddingCache(key_prefix="embedding_1024") if self.deep_model else None
         else:
             self.fast_cache = None
             self.deep_cache = None
-        
+
         # Initialize reranker if enabled (BGE reranker works independently of embedding model)
         if enable_reranker:
             self.logger.info("Loading BGE reranker for search refinement")
@@ -140,8 +147,9 @@ class HybridEmbeddingsProvider:
             )
         else:
             self._reranker = None
-        
-        self.logger.info(f"HybridEmbeddingsProvider initialized with OpenAI deep model (reranker: {enable_reranker})")
+
+        deep_status = "OpenAI" if self.deep_model else "disabled"
+        self.logger.info(f"HybridEmbeddingsProvider initialized (deep: {deep_status}, reranker: {enable_reranker})")
     
     def encode_realtime(self,
                        texts: Union[str, List[str]],
@@ -189,39 +197,49 @@ class HybridEmbeddingsProvider:
                    batch_size: Optional[int] = None) -> np.ndarray:
         """
         Generate deep 1024-dimensional embeddings for advanced features.
-        
+
         Used for:
         - Temporal RAG retrieval
         - Conversational search
         - Long-form content understanding
-        
+
         Args:
             texts: Text or list of texts to encode
             batch_size: Batch size for encoding
-            
+
         Returns:
             1024-dimensional normalized embeddings
+
+        Raises:
+            RuntimeError: If OpenAI embeddings are not enabled
         """
+        if self.deep_model is None:
+            raise RuntimeError(
+                "OpenAI embeddings not available. Enable with "
+                "embeddings.openai_embeddings_enabled=true in config and ensure "
+                "openai_embeddings_key is set in Vault."
+            )
+
         if batch_size is None:
             from config.config_manager import config
             batch_size = config.embeddings.deep_model.batch_size
-        
+
         # Handle caching for single text
         if self.cache_enabled and isinstance(texts, str) and self.deep_cache:
             cached = self.deep_cache.get(texts)
             if cached is not None:
                 return cached
-        
+
         # Generate embeddings
         embeddings = self.deep_model.encode(texts, batch_size=batch_size)
-        
+
         # Convert to fp16 for memory efficiency
         embeddings = embeddings.astype(np.float16)
-        
+
         # Cache single embeddings
         if self.cache_enabled and isinstance(texts, str) and self.deep_cache:
             self.deep_cache.set(texts, embeddings)
-        
+
         return embeddings
     
     def rerank(self,
@@ -301,12 +319,18 @@ class HybridEmbeddingsProvider:
         """
         try:
             # Stage 1: Fast embedding-based similarity search
+            if embedding_model == "deep" and self.deep_model is None:
+                raise RuntimeError(
+                    "Deep embeddings requested but OpenAI embeddings not available. "
+                    "Enable with embeddings.openai_embeddings_enabled=true in config."
+                )
+
             if passage_embeddings is None:
                 if embedding_model == "fast":
                     passage_embeddings = self.encode_realtime(passages)
                 else:
                     passage_embeddings = self.encode_deep(passages)
-            
+
             if embedding_model == "fast":
                 query_embedding = self.encode_realtime(query)
             else:
@@ -341,10 +365,9 @@ class HybridEmbeddingsProvider:
             raise
     
     def close(self):
-        """Clean up resources for both models and reranker."""
+        """Clean up resources for models and reranker."""
         self.fast_model.close()
-        # OpenAI model has close method too
-        if hasattr(self.deep_model, 'close'):
+        if self.deep_model and hasattr(self.deep_model, 'close'):
             self.deep_model.close()
         if self._reranker:
             self._reranker.close()
