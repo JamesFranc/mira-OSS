@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 # Format: (module_path, service_name, needs_init, init_args_factory)
 SCHEDULED_TASK_MODULES: List[Tuple[str, str, bool, callable]] = [
     # Auth service - already has global instance
-    ('auth.service', 'auth_service', False, None),
+    # auth.service removed for OSS (single-user mode)
 
     # Vault client - token renewal to prevent expiration (uses factory to ensure initialization)
     ('clients.vault_client', '_ensure_vault_client', True, lambda: {}),

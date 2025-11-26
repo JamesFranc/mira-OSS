@@ -62,12 +62,63 @@ def ensure_single_user(app: FastAPI) -> None:
                 VALUES (%(id)s, %(email)s, true, true)
             """, {'id': user_id, 'email': default_email})
 
+            # Create the continuum (normally done during signup flow)
+            continuum_id = str(uuid.uuid4())
+            session.execute_update("""
+                INSERT INTO continuums (id, user_id, metadata, created_at, updated_at)
+                VALUES (%(id)s, %(user_id)s, '{}'::jsonb, NOW(), NOW())
+            """, {'id': continuum_id, 'user_id': user_id})
+
+            # Prepopulate with starter messages (ported from auth.database.prepopulate_new_user)
+            import json
+            from utils.timezone_utils import utc_now
+
+            # Message 1: Beginning marker
+            msg1_id = str(uuid.uuid4())
+            session.execute_update("""
+                INSERT INTO messages (id, continuum_id, user_id, role, content, metadata, created_at)
+                VALUES (%(id)s, %(continuum_id)s, %(user_id)s, 'user', %(content)s, %(metadata)s, NOW())
+            """, {
+                'id': msg1_id,
+                'continuum_id': continuum_id,
+                'user_id': user_id,
+                'content': '.. this is the beginning of the conversation. there are no messages older than this one ..',
+                'metadata': json.dumps({'system_generated': True})
+            })
+
+            # Message 2: Active segment sentinel
+            segment_id = str(uuid.uuid4())
+            segment_metadata = {
+                'is_segment_boundary': True,
+                'status': 'active',
+                'segment_id': segment_id,
+                'segment_start_time': utc_now().isoformat(),
+                'segment_end_time': utc_now().isoformat(),
+                'tools_used': [],
+                'memories_extracted': False,
+                'domain_blocks_updated': False
+            }
+            msg2_id = str(uuid.uuid4())
+            session.execute_update("""
+                INSERT INTO messages (id, continuum_id, user_id, role, content, metadata, created_at)
+                VALUES (%(id)s, %(continuum_id)s, %(user_id)s, 'assistant', %(content)s, %(metadata)s, NOW() + interval '100 milliseconds')
+            """, {
+                'id': msg2_id,
+                'continuum_id': continuum_id,
+                'user_id': user_id,
+                'content': '[Segment in progress]',
+                'metadata': json.dumps(segment_metadata)
+            })
+
+            logger.info(f"Created user {user_id} with continuum {continuum_id} and starter messages")
+
             api_key = f"mira_{secrets.token_urlsafe(32)}"
 
             try:
                 from clients.vault_client import _ensure_vault_client
                 vault_client = _ensure_vault_client()
-                vault_client.client.secrets.kv.v2.create_or_update_secret(
+                # Use patch to add mira_api without overwriting anthropic_key/groq_key
+                vault_client.client.secrets.kv.v2.patch(
                     path='mira/api_keys',
                     secret=dict(mira_api=api_key)
                 )

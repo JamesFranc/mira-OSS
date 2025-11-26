@@ -33,6 +33,7 @@ optimum[onnxruntime]  # ONNX model optimization - sentence_transformers.py, BGE 
 onnx             # ONNX runtime - sentence_transformers.py, bge_embeddings.py
 onnxruntime      # ONNX inference engine - bge_embeddings.py
 onnxconverter_common  # ONNX conversion utilities - bge_embeddings.py
+onnxscript           # ONNX model scripting - bge_reranker.py torch.onnx.export
 tqdm             # Progress bars - bge_embeddings.py model loading
 spacy>=3.7.0     # NER and NLP - entity extraction for memory linking
 # Note: Install en_core_web_lg with: python -m spacy download en_core_web_lg

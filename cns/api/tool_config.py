@@ -14,7 +14,6 @@ from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field, ValidationError as PydanticValidationError
 
 from auth.api import get_current_user
-from auth.types import SessionData
 from cns.api.base import (
     APIResponse,
     ValidationError,
@@ -93,7 +92,7 @@ def _delete_user_tool_config(tool_name: str) -> bool:
 @router.get("/actions/tools")
 async def list_configurable_tools(
     response: Response,
-    current_user: SessionData = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """
     List all tools with registered configuration classes.
@@ -139,7 +138,7 @@ async def list_configurable_tools(
 async def get_tool_config(
     tool_name: str,
     response: Response,
-    current_user: SessionData = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """
     Get current configuration for a tool.
@@ -197,7 +196,7 @@ async def get_tool_config(
 async def get_tool_schema(
     tool_name: str,
     response: Response,
-    current_user: SessionData = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """
     Get JSON Schema for a tool's configuration.
@@ -249,7 +248,7 @@ async def update_tool_config(
     tool_name: str,
     request_body: ToolConfigUpdateRequest,
     response: Response,
-    current_user: SessionData = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """
     Update configuration for a tool.
@@ -319,7 +318,7 @@ async def validate_tool_config(
     tool_name: str,
     request_body: ToolConfigUpdateRequest,
     response: Response,
-    current_user: SessionData = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """
     Validate tool configuration without saving.
@@ -419,7 +418,7 @@ def _call_tool_validation(tool_name: str, config: Dict[str, Any]) -> Dict[str, A
 async def reset_tool_config(
     tool_name: str,
     response: Response,
-    current_user: SessionData = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """
     Reset tool configuration to defaults.

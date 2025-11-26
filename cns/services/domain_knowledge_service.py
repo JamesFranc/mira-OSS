@@ -92,7 +92,10 @@ class DomainKnowledgeService:
         self.config = config.domain_knowledge
 
         # Get Letta API key from Vault - optional, service disables if missing
-        api_key = get_api_key("letta_key")
+        try:
+            api_key = get_api_key("letta_key")
+        except KeyError:
+            api_key = None
         if not api_key:
             logger.warning("Letta API key 'letta_key' not found in Vault - domain knowledge service disabled")
             self.enabled = False

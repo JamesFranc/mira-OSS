@@ -1540,13 +1540,22 @@ cat > /opt/mira/mira.sh <<'WRAPPER_EOF'
 #!/bin/bash
 # MIRA CLI wrapper - sets Vault environment variables for talkto_mira.py
 
+# Save original directory
+ORIGINAL_DIR="$(pwd)"
+
 # Set Vault environment variables (files contain just the raw value)
 export VAULT_ADDR='http://127.0.0.1:8200'
 export VAULT_ROLE_ID=$(cat /opt/vault/role-id.txt)
 export VAULT_SECRET_ID=$(cat /opt/vault/secret-id.txt)
 
+# Change to MIRA app directory
+cd /opt/mira/app
+
 # Launch MIRA CLI
 /opt/mira/app/venv/bin/python3 /opt/mira/app/talkto_mira.py "$@"
+
+# Return to original directory
+cd "$ORIGINAL_DIR"
 WRAPPER_EOF
 echo -e "${CHECKMARK}"
 
