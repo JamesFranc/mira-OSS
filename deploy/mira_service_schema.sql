@@ -27,6 +27,7 @@
 -- so we use separate indexes that PostgreSQL combines during execution:
 --   - B-tree index on user_id (for RLS filtering)
 --   - IVFFlat index on embedding (for similarity search)
+--   - BYPASSRLS required for admin operations that need to bypass Row Level Security
 --   - Query planner uses both: vector index finds candidates, RLS filters them
 
 -- =====================================================================
@@ -35,7 +36,6 @@
 
 -- Database owner role (schema management, migrations, backups)
 -- NOT a superuser - can only manage mira_service database
--- BYPASSRLS required for admin operations that need to bypass Row Level Security
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'mira_admin') THEN

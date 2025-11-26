@@ -5,11 +5,15 @@ MIRA Chat - Rich-based CLI for chatting with MIRA.
 Usage:
     python talkto_mira.py              # Interactive chat
     python talkto_mira.py --headless "message"  # One-shot query
+
+TODO: Consider adding `questionary` for arrow-key selection menus on /model and /think.
+      Works with Rich but has its own styling (prompt_toolkit-based).
 """
 
 import argparse
 import atexit
 import os
+import random
 import re
 import signal
 import subprocess
@@ -82,8 +86,11 @@ MODEL_LABELS = {"claude-opus-4-5-20251101": "opus", "claude-haiku-4-5-20251001":
 def get_preferences(token: str) -> tuple[str, str]:
     model_resp = call_action(token, "continuum", "get_model_preference")
     think_resp = call_action(token, "continuum", "get_thinking_budget_preference")
-    model = model_resp.get("model") if model_resp.get("success") else None
-    budget = think_resp.get("budget") if think_resp.get("success") else None
+    # API wraps handler results in {"success": ..., "data": {...}}
+    model_data = model_resp.get("data", {}) if model_resp.get("success") else {}
+    think_data = think_resp.get("data", {}) if think_resp.get("success") else {}
+    model = model_data.get("model")
+    budget = think_data.get("budget")
     return MODEL_LABELS.get(model, model or "default"), THINKING_LABELS.get(budget, str(budget) if budget else "default")
 
 
@@ -149,33 +156,82 @@ def shutdown_server():
 # Splashscreen
 # ─────────────────────────────────────────────────────────────────────────────
 
-LOGO = [
-    "                                               @@@@@@@@@@@                      ",
-    "@@@@@@@        @@        @@@@@@         @      @@@@@@@@@@@    @@@@@@      @@@@@@",
-    "@@ @  @        @@        @@@@@@        @ @     @@@@@@@@@@@    @    @      @@@@@@",
-    "@@ @  @        @@        @   @        @ @@@    @@@@@@@@@@@    @@@@@@      @@@@@@",
-    "                                                @@@@@@@@@@@"
-]
+ASCII_CHARS = ['.', '+', '*', 'o', "'", '-', '~', '|']
 
 
-def show_splashscreen() -> None:
-    """Display MIRA splashscreen. Skips if terminal too narrow."""
-    if console.width < 80:
-        return
+def clear_screen_and_scrollback() -> None:
+    """Clear visible screen and scrollback buffer."""
+    print("\033[2J\033[3J\033[H", end="", flush=True)
 
-    console.clear()
+
+def show_splashscreen(start_server: bool = False) -> bool:
+    """
+    Animated ASCII splashscreen matching web loading animation.
+
+    If start_server=True, starts the API server and animates until ready.
+    Returns True if server was started, False otherwise.
+    """
+    if console.width < 40:
+        if start_server and not is_api_running():
+            start_api_server()
+            return wait_for_api_ready()
+        return False
+
+    clear_screen_and_scrollback()
+
+    width = console.width
+    frame_delay = 0.05
+    min_frames = 40  # Minimum 2 seconds of animation
+    max_frames = int(SERVER_STARTUP_TIMEOUT / frame_delay)  # Max based on server timeout
+
+    # Initialize character line (sparse like web version)
+    chars = []
+    for i in range(width):
+        if i == 0 or i == width - 1 or random.random() < 0.2:
+            chars.append(random.choice(ASCII_CHARS))
+        else:
+            chars.append(' ')
 
     # Center vertically
-    vertical_padding = (console.height - len(LOGO)) // 2
-    console.print("\n" * vertical_padding, end="")
+    vertical_pos = console.height // 2
 
-    # Print logo centered in lime green
-    for line in LOGO:
-        padding = (console.width - len(line)) // 2
-        console.print(" " * padding + line, style="bright_green")
+    # Start server if requested
+    server_started = False
+    if start_server and not is_api_running():
+        start_api_server()
+        server_started = True
 
-    time.sleep(2)
-    console.clear()
+    frame = 0
+    server_ready = not start_server or is_api_running()  # Already ready if not starting
+
+    while frame < max_frames:
+        # Check if server is ready (after minimum animation time)
+        if server_started and frame >= min_frames:
+            if is_api_running():
+                server_ready = True
+                break
+
+        # Randomly mutate some characters each frame
+        for i in range(width):
+            if random.random() < 0.15:
+                if random.random() < 0.3:
+                    chars[i] = random.choice(ASCII_CHARS)
+                else:
+                    chars[i] = ' '
+
+        # Render frame
+        line = ''.join(chars)
+        print(f"\033[{vertical_pos};1H", end="")  # Move cursor to center row
+        console.print(line, style="bright_green", end="", highlight=False)
+        time.sleep(frame_delay)
+        frame += 1
+
+        # If not waiting for server, just run minimum frames
+        if not server_started and frame >= min_frames:
+            break
+
+    clear_screen_and_scrollback()
+    return server_started and server_ready
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -223,7 +279,7 @@ def render_screen(
     show_thinking: bool = False
 ) -> None:
     """Clear and render the full screen with status bar always at bottom."""
-    console.clear()
+    clear_screen_and_scrollback()
 
     # Calculate content height
     content_lines = len(history) * 8 + 2
@@ -273,6 +329,16 @@ def chat_loop(token: str) -> None:
     history: list[tuple[str, str]] = []
     model_pref, thinking_pref = get_preferences(token)
 
+    # Mutable state for resize handler (closures capture by reference for mutables)
+    prefs = {'model': model_pref, 'thinking': thinking_pref}
+
+    def handle_resize(signum, frame):
+        render_screen(history, prefs['model'], prefs['thinking'])
+
+    # SIGWINCH is Unix-only (terminal window resize)
+    if hasattr(signal, 'SIGWINCH'):
+        signal.signal(signal.SIGWINCH, handle_resize)
+
     render_screen(history, model_pref, thinking_pref)
 
     while True:
@@ -302,6 +368,7 @@ def chat_loop(token: str) -> None:
 
             elif cmd == "status":
                 model_pref, thinking_pref = get_preferences(token)
+                prefs['model'], prefs['thinking'] = model_pref, thinking_pref
                 console.print()
                 render_mira_message(f"Model: {model_pref}\nThinking: {thinking_pref}")
                 console.print()
@@ -309,10 +376,8 @@ def chat_loop(token: str) -> None:
             elif cmd == "model":
                 if arg and arg in MODEL_ALIASES:
                     if set_model_preference(token, arg):
-                        model_pref = arg  # Trust what we set, don't re-fetch
-                        console.print()
-                        render_mira_message(f"Model → {model_pref}")
-                        console.print()
+                        model_pref = prefs['model'] = arg
+                        render_screen(history, model_pref, thinking_pref)
                     else:
                         console.print()
                         render_mira_message("Failed to set model", is_error=True)
@@ -329,10 +394,8 @@ def chat_loop(token: str) -> None:
             elif cmd == "think":
                 if arg and arg in THINKING_LEVELS:
                     if set_thinking_preference(token, arg):
-                        thinking_pref = arg  # Trust what we set, don't re-fetch
-                        console.print()
-                        render_mira_message(f"Thinking → {thinking_pref}")
-                        console.print()
+                        thinking_pref = prefs['thinking'] = arg
+                        render_screen(history, model_pref, thinking_pref)
                     else:
                         console.print()
                         render_mira_message("Failed to set thinking", is_error=True)
@@ -390,24 +453,21 @@ def main():
     parser.add_argument('--headless', type=str, help="One-shot message")
     args = parser.parse_args()
 
-    # Show splashscreen for interactive mode
-    if not args.headless:
-        show_splashscreen()
-
     server_started = False
-    if not args.headless and not is_api_running():
-        console.print("[bright_green]Starting MIRA API server...[/bright_green]")
-        start_api_server()
-        server_started = True
-        if not wait_for_api_ready():
-            console.print("[red]Server failed to start[/red]", style="bold")
-            shutdown_server()
-            sys.exit(1)
-        console.print("[bright_green]Server ready.[/bright_green]")
-        time.sleep(0.5)
-        atexit.register(shutdown_server)
-        signal.signal(signal.SIGINT, lambda s, f: (shutdown_server(), sys.exit(0)))
-        signal.signal(signal.SIGTERM, lambda s, f: (shutdown_server(), sys.exit(0)))
+    if not args.headless:
+        # Splashscreen handles server startup during animation
+        need_server = not is_api_running()
+        server_ready = show_splashscreen(start_server=need_server)
+
+        if need_server:
+            if not server_ready:
+                console.print("[red]Server failed to start[/red]", style="bold")
+                shutdown_server()
+                sys.exit(1)
+            server_started = True
+            atexit.register(shutdown_server)
+            signal.signal(signal.SIGINT, lambda s, f: (shutdown_server(), sys.exit(0)))
+            signal.signal(signal.SIGTERM, lambda s, f: (shutdown_server(), sys.exit(0)))
 
     try:
         token = get_api_key('mira_api')
