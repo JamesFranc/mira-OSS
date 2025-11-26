@@ -658,8 +658,9 @@ print_info "To switch to online mode later, just add API keys to Vault."
 read -p "$(echo -e ${CYAN}Run offline only?${RESET}) (y/n, default=n): " OFFLINE_MODE_INPUT
 if [[ "$OFFLINE_MODE_INPUT" =~ ^[Yy](es)?$ ]]; then
     CONFIG_OFFLINE_MODE="yes"
-    CONFIG_ANTHROPIC_KEY=""
-    CONFIG_GROQ_KEY=""
+    # Use placeholder keys so Vault validation passes - these won't actually work
+    CONFIG_ANTHROPIC_KEY="OFFLINE_MODE_PLACEHOLDER"
+    CONFIG_GROQ_KEY="OFFLINE_MODE_PLACEHOLDER"
     CONFIG_KAGI_KEY=""
     STATUS_ANTHROPIC="${DIM}Offline mode${RESET}"
     STATUS_GROQ="${DIM}Offline mode${RESET}"
@@ -673,47 +674,8 @@ if [[ "$OFFLINE_MODE_INPUT" =~ ^[Yy](es)?$ ]]; then
         CONFIG_OLLAMA_MODEL="$OLLAMA_MODEL_INPUT"
     fi
 
-    # Try to install Ollama if not present
-    echo ""
-    if command -v ollama &> /dev/null; then
-        print_info "Ollama already installed"
-        OLLAMA_INSTALLED=true
-    else
-        print_info "Attempting to install Ollama..."
-        if curl -fsSL https://ollama.com/install.sh | sh > /dev/null 2>&1; then
-            print_success "Ollama installed"
-            OLLAMA_INSTALLED=true
-        else
-            print_warning "Could not install Ollama (network unavailable or blocked)"
-            OLLAMA_INSTALLED=false
-        fi
-    fi
-
-    # Try to pull the model
-    if [ "$OLLAMA_INSTALLED" = true ]; then
-        print_info "Pulling model ${CONFIG_OLLAMA_MODEL}..."
-        if ollama pull "$CONFIG_OLLAMA_MODEL" > /dev/null 2>&1; then
-            print_success "Model ${CONFIG_OLLAMA_MODEL} ready"
-        else
-            print_warning "Could not pull model (network unavailable)"
-            echo ""
-            print_info "For air-gapped installation, manually transfer the model:"
-            print_info "  1. On a connected machine: ollama pull ${CONFIG_OLLAMA_MODEL}"
-            print_info "  2. Export: ~/.ollama/models -> transfer to this machine"
-            print_info "  3. Or use: ollama create ${CONFIG_OLLAMA_MODEL} -f Modelfile"
-        fi
-    else
-        echo ""
-        print_info "For air-gapped Ollama installation:"
-        print_info "  1. Download Ollama binary from https://ollama.com/download"
-        print_info "  2. Transfer and install manually"
-        print_info "  3. Transfer model files to ~/.ollama/models"
-        print_info "  4. Start Ollama: ollama serve"
-    fi
-
     # Store model name for later config patching (after files are copied)
     CONFIG_PATCH_OLLAMA_MODEL="$CONFIG_OLLAMA_MODEL"
-    echo ""
 else
     CONFIG_OFFLINE_MODE="no"
 
@@ -971,6 +933,110 @@ elif [ "$OS" = "macos" ]; then
 fi
 
 print_success "System dependencies installed"
+
+# Ollama setup (only for offline mode)
+if [ "$CONFIG_OFFLINE_MODE" = "yes" ]; then
+    print_header "Step 1b: Ollama Setup (Offline Mode)"
+
+    # Install Ollama if not present
+    echo -ne "${DIM}${ARROW}${RESET} Checking for Ollama... "
+    if command -v ollama &> /dev/null; then
+        echo -e "${CHECKMARK} ${DIM}(already installed)${RESET}"
+        OLLAMA_INSTALLED=true
+    else
+        echo -e "${DIM}(not found)${RESET}"
+        if [ "$LOUD_MODE" = true ]; then
+            print_step "Installing Ollama..."
+            if curl -fsSL https://ollama.com/install.sh | sh; then
+                OLLAMA_INSTALLED=true
+            else
+                OLLAMA_INSTALLED=false
+            fi
+        else
+            (curl -fsSL https://ollama.com/install.sh | sh > /dev/null 2>&1) &
+            if show_progress $! "Installing Ollama"; then
+                OLLAMA_INSTALLED=true
+            else
+                OLLAMA_INSTALLED=false
+            fi
+        fi
+    fi
+
+    if [ "$OLLAMA_INSTALLED" = true ]; then
+        # Start Ollama server if not already running
+        echo -ne "${DIM}${ARROW}${RESET} Checking Ollama server... "
+        if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+            echo -e "${CHECKMARK} ${DIM}(already running)${RESET}"
+        else
+            echo -e "${DIM}(starting)${RESET}"
+            # Start server based on OS/init system
+            if [ "$OS" = "linux" ] && systemctl is-enabled ollama &>/dev/null 2>&1; then
+                run_with_status "Starting Ollama service" \
+                    sudo systemctl start ollama
+            else
+                # Start in background for macOS or non-systemd Linux
+                ollama serve > /dev/null 2>&1 &
+                OLLAMA_PID=$!
+                print_info "Started Ollama server (PID $OLLAMA_PID)"
+            fi
+
+            # Wait for server to be ready
+            echo -ne "${DIM}${ARROW}${RESET} Waiting for Ollama server... "
+            OLLAMA_READY=0
+            for i in {1..30}; do
+                if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+                    OLLAMA_READY=1
+                    break
+                fi
+                sleep 1
+            done
+
+            if [ $OLLAMA_READY -eq 1 ]; then
+                echo -e "${CHECKMARK} ${DIM}(ready after ${i}s)${RESET}"
+            else
+                echo -e "${ERROR}"
+                print_warning "Ollama server did not start within 30 seconds"
+                print_info "Model pull will be skipped - you can pull manually later:"
+                print_info "  ollama serve &"
+                print_info "  ollama pull ${CONFIG_OLLAMA_MODEL}"
+            fi
+        fi
+
+        # Pull the model if server is ready
+        if curl -s http://localhost:11434/api/tags > /dev/null 2>&1; then
+            if [ "$LOUD_MODE" = true ]; then
+                print_step "Pulling model ${CONFIG_OLLAMA_MODEL}..."
+                if ollama pull "$CONFIG_OLLAMA_MODEL"; then
+                    print_success "Model ${CONFIG_OLLAMA_MODEL} ready"
+                else
+                    print_warning "Could not pull model (network unavailable)"
+                fi
+            else
+                (ollama pull "$CONFIG_OLLAMA_MODEL" > /dev/null 2>&1) &
+                if show_progress $! "Pulling model ${CONFIG_OLLAMA_MODEL}"; then
+                    print_success "Model ${CONFIG_OLLAMA_MODEL} ready"
+                else
+                    print_warning "Could not pull model (network unavailable)"
+                    echo ""
+                    print_info "For air-gapped installation, manually transfer the model:"
+                    print_info "  1. On a connected machine: ollama pull ${CONFIG_OLLAMA_MODEL}"
+                    print_info "  2. Export: ~/.ollama/models -> transfer to this machine"
+                    print_info "  3. Or use: ollama create ${CONFIG_OLLAMA_MODEL} -f Modelfile"
+                fi
+            fi
+        fi
+    else
+        print_warning "Could not install Ollama (network unavailable or blocked)"
+        echo ""
+        print_info "For air-gapped Ollama installation:"
+        print_info "  1. Download Ollama binary from https://ollama.com/download"
+        print_info "  2. Transfer and install manually"
+        print_info "  3. Transfer model files to ~/.ollama/models"
+        print_info "  4. Start Ollama: ollama serve"
+    fi
+
+    print_success "Ollama setup complete"
+fi
 
 print_header "Step 2: Python Verification"
 
