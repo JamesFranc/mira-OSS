@@ -66,6 +66,7 @@ from cns.core.stream_events import (
     ToolCompletedEvent, ToolErrorEvent, CompleteEvent, ErrorEvent,
     CircuitBreakerEvent, RetryEvent
 )
+from tools.repo import ANTHROPIC_BETA_FLAGS
 
 
 class CircuitBreaker:
@@ -73,12 +74,10 @@ class CircuitBreaker:
     Simple circuit breaker for tool execution chains.
     Stops chains on:
     - Any tool error
-    - Repeated identical results
-    - Maximum iteration limit
+    - Repeated identical results (loop detection)
     """
 
-    def __init__(self, max_iterations: int = 10):
-        self.max_iterations = max_iterations
+    def __init__(self):
         self.tool_results: List[Tuple[str, Optional[str], Optional[Exception]]] = []
 
     def record_execution(self, tool_name: str, result: Any, error: Optional[Exception] = None):
@@ -95,17 +94,13 @@ class CircuitBreaker:
         if self.tool_results[-1][2] is not None:
             return False, f"Tool error: {self.tool_results[-1][2]}"
 
-        # Check for repeated results (last 2 executions)
+        # Check for repeated results (last 2 executions) - loop detection
         if len(self.tool_results) >= 2:
             last_result = self.tool_results[-1][1]
             second_last_result = self.tool_results[-2][1]
 
             if last_result == second_last_result and last_result is not None:
                 return False, "Repeated identical results"
-
-        # Check max iterations
-        if len(self.tool_results) >= self.max_iterations:
-            return False, f"Reached maximum iterations ({self.max_iterations})"
 
         return True, "Continue"
 
@@ -278,7 +273,6 @@ class LLMProvider:
 
         # Optional tool repository for tool execution
         self.tool_repo = tool_repo
-        self.max_tool_iterations = config.system.max_tool_iterations
 
         # Check for firehose mode
         self.firehose_enabled = getattr(config.system, '_firehose_enabled', False)
@@ -402,6 +396,41 @@ class LLMProvider:
 
         return system_content, anthropic_messages
 
+    def _strip_container_uploads_from_messages(
+        self,
+        messages: List[Dict]
+    ) -> List[Dict]:
+        """
+        Convert container_upload blocks to text warnings for generic providers.
+
+        Generic providers (Groq, OpenRouter) don't support Files API or
+        container_upload blocks. This strips them out and replaces with
+        warning text.
+
+        Args:
+            messages: Messages with potential container_upload blocks
+
+        Returns:
+            Messages with container_upload blocks replaced by text warnings
+        """
+        stripped = []
+        for msg in messages:
+            if isinstance(msg.get("content"), list):
+                new_blocks = []
+                for block in msg["content"]:
+                    if block.get("type") == "container_upload":
+                        file_id = block.get("source", {}).get("file_id", "unknown")
+                        new_blocks.append({
+                            "type": "text",
+                            "text": f"[File upload not supported by this provider: {file_id}]"
+                        })
+                    else:
+                        new_blocks.append(block)
+                stripped.append({**msg, "content": new_blocks})
+            else:
+                stripped.append(msg)
+        return stripped
+
     def _write_firehose(self, system_prompt: str, messages: List[Dict], tools: Optional[List[Dict]]) -> None:
         """Write request data to firehose_output.json for debugging."""
         if not self.firehose_enabled:
@@ -443,47 +472,65 @@ class LLMProvider:
         tools_copy[-1]["cache_control"] = {"type": "ephemeral"}
         return tools_copy
 
-    def _strip_tool_content(self, messages: List[Dict]) -> List[Dict]:
+    def _convert_tool_content_to_text(self, messages: List[Dict]) -> List[Dict]:
         """
-        Strip tool_use and tool_result blocks from messages for execution model.
+        Convert tool_use and tool_result blocks to text for execution model.
 
-        The execution model should only see text content to prevent it from
-        attempting tool calls when tools aren't provided.
+        Instead of stripping tool content (which loses context), this converts
+        tool interactions to human-readable text so the execution model can
+        see what tools were called and what results were returned.
 
         Args:
             messages: Anthropic-format messages with potential tool content
 
         Returns:
-            Messages with only text content preserved
+            Messages with tool content converted to text
         """
-        stripped = []
+        converted = []
         for msg in messages:
             content = msg.get("content")
 
             # Handle string content (already text-only)
             if isinstance(content, str):
-                stripped.append(msg)
+                converted.append(msg)
                 continue
 
-            # Handle list content - filter to text blocks only
+            # Handle list content - convert tool blocks to text
             if isinstance(content, list):
-                text_blocks = [
-                    block for block in content
-                    if isinstance(block, dict) and block.get("type") == "text"
-                ]
-                # Skip message entirely if no text content remains
-                if not text_blocks:
+                text_parts = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+
+                    block_type = block.get("type")
+
+                    if block_type == "text":
+                        text_parts.append(block.get("text", ""))
+
+                    elif block_type == "tool_use":
+                        # Convert tool call to readable text
+                        tool_name = block.get("name", "unknown")
+                        tool_input = block.get("input", {})
+                        text_parts.append(f"[Called {tool_name}: {tool_input}]")
+
+                    elif block_type == "tool_result":
+                        # Convert tool result to readable text
+                        result_content = block.get("content", "")
+                        if isinstance(result_content, (dict, list)):
+                            result_content = json.dumps(result_content)
+                        text_parts.append(f"[Result: {result_content}]")
+
+                # Skip message if no content after conversion
+                if not text_parts:
                     continue
-                # Simplify to string if only one text block
-                if len(text_blocks) == 1:
-                    stripped.append({**msg, "content": text_blocks[0].get("text", "")})
-                else:
-                    stripped.append({**msg, "content": text_blocks})
+
+                # Join all parts into single string
+                converted.append({**msg, "content": "\n".join(text_parts)})
             else:
                 # Unknown format, pass through
-                stripped.append(msg)
+                converted.append(msg)
 
-        return stripped
+        return converted
 
     def generate_response(
         self,
@@ -496,6 +543,7 @@ class LLMProvider:
         api_key_override: Optional[str] = None,
         system_override: Optional[str] = None,
         thinking_enabled: Optional[bool] = None,
+        container_id: Optional[str] = None,
         thinking_budget: Optional[int] = None,
         **kwargs
     ) -> anthropic.types.Message:
@@ -534,6 +582,7 @@ class LLMProvider:
             system_override: Optional system prompt override
             thinking_enabled: Override instance-level extended thinking setting
             thinking_budget: Override instance-level thinking budget tokens
+            container_id: Optional container ID to reuse (for multi-turn file access)
             **kwargs: Additional parameters
         """
         # Pass thinking parameters through kwargs to internal methods
@@ -541,6 +590,8 @@ class LLMProvider:
             kwargs['thinking_enabled'] = thinking_enabled
         if thinking_budget is not None:
             kwargs['thinking_budget'] = thinking_budget
+        if container_id is not None:
+            kwargs['container_id'] = container_id
 
         # Non-streaming path for simple consumers
         if not stream:
@@ -674,10 +725,18 @@ class LLMProvider:
                 else:
                     system_prompt, messages = self._prepare_messages(messages)
 
-                # Strip cache_control from tools (not supported in generic providers)
+                # Strip unsupported features from tools for generic providers
+                # - cache_control: not supported
+                # - code_execution: Anthropic-specific server-side tool
                 generic_tools = None
                 if tools:
-                    generic_tools = [{k: v for k, v in tool.items() if k != "cache_control"} for tool in tools]
+                    # Filter out code_execution (Anthropic server-side tool)
+                    filtered_tools = [tool for tool in tools if tool.get("type") != "code_execution_20250825"]
+                    # Strip cache_control from remaining tools
+                    generic_tools = [{k: v for k, v in tool.items() if k != "cache_control"} for tool in filtered_tools]
+
+                # Strip container_upload blocks from messages (Files API not supported)
+                messages = self._strip_container_uploads_from_messages(messages)
 
                 # Call generic client
                 return generic_client.messages.create(
@@ -769,7 +828,29 @@ class LLMProvider:
                     "budget_tokens": thinking_budget
                 }
 
-            message = self.anthropic_client.messages.create(**api_params)
+            # Add container ID for multi-turn file persistence
+            container_id = kwargs.get('container_id')
+            if container_id:
+                api_params["container"] = container_id
+                self.logger.debug(f"Reusing container: {container_id}")
+
+            # Use beta API for code execution and Files API
+            message = self.anthropic_client.beta.messages.create(
+                **api_params,
+                betas=ANTHROPIC_BETA_FLAGS
+            )
+
+            # Capture container ID from response for reuse
+            if hasattr(message, 'container') and message.container:
+                response_container_id = message.container.id
+                self.logger.debug(f"Container ID captured: {response_container_id}")
+                # Store in message metadata for orchestrator to retrieve
+                if not hasattr(message, '_container_id'):
+                    message._container_id = response_container_id
+            elif container_id:
+                # Container was reused, preserve the ID
+                if not hasattr(message, '_container_id'):
+                    message._container_id = container_id
 
             # Log cache usage if available
             if hasattr(message, 'usage') and message.usage:
@@ -836,8 +917,8 @@ class LLMProvider:
         # Route execution model to OpenRouter (non-streaming, no tools - text generation only)
         if selected_model == self.execution_model and self.execution_api_key:
             self.logger.debug(f"Routing execution model to OpenRouter: {self.execution_model}")
-            # Strip tool content from messages to prevent model from attempting tool calls
-            execution_messages = self._strip_tool_content(messages)
+            # Convert tool content to text so execution model sees what was done
+            execution_messages = self._convert_tool_content_to_text(messages)
             # Use task-focused system prompt - full prompt contains tool descriptions that
             # cause the model to generate tool calls even when tools array is empty.
             # Execution model's role: synthesize tool results into user-facing response.
@@ -930,7 +1011,17 @@ class LLMProvider:
                     "budget_tokens": thinking_budget
                 }
 
-            with self.anthropic_client.messages.stream(**stream_params) as stream:
+            # Add container ID for multi-turn file persistence
+            container_id = kwargs.get('container_id')
+            if container_id:
+                stream_params["container"] = container_id
+                self.logger.debug(f"Reusing container: {container_id}")
+
+            # Use beta API for code execution and Files API
+            with self.anthropic_client.beta.messages.stream(
+                **stream_params,
+                betas=ANTHROPIC_BETA_FLAGS
+            ) as stream:
                 # Stream events
                 for event in stream:
                     if event.type == "text":
@@ -955,6 +1046,19 @@ class LLMProvider:
 
                 # Get final message (Anthropic Message object)
                 final_message = stream.get_final_message()
+
+                # Capture container ID from response for reuse
+                if hasattr(final_message, 'container') and final_message.container:
+                    response_container_id = final_message.container.id
+                    self.logger.info(f"📦 Container ID captured: {response_container_id}")
+                    # Store in message metadata for orchestrator to retrieve
+                    if not hasattr(final_message, '_container_id'):
+                        final_message._container_id = response_container_id
+                elif container_id:
+                    # Container was reused, preserve the ID
+                    self.logger.info(f"📦 Container reused (no new ID in response): {container_id}")
+                    if not hasattr(final_message, '_container_id'):
+                        final_message._container_id = container_id
 
                 # Log cache usage if available
                 if hasattr(final_message, 'usage') and final_message.usage:
@@ -1002,7 +1106,7 @@ class LLMProvider:
         **kwargs
     ) -> Generator[StreamEvent, None, None]:
         """Execute with tool loop using Anthropic format with dynamic model selection."""
-        circuit_breaker = CircuitBreaker(self.max_tool_iterations)
+        circuit_breaker = CircuitBreaker()
         current_messages = messages.copy()
         last_response = None  # Track previous response for model selection
 
@@ -1030,6 +1134,7 @@ class LLMProvider:
 
             # Extract tool calls from Anthropic Message
             tool_calls = self.extract_tool_calls(response)
+            self.logger.info(f"Extracted {len(tool_calls)} tool calls: {[tc['tool_name'] for tc in tool_calls]}")
 
             # If no tool calls, we're done
             if not tool_calls:
@@ -1065,9 +1170,11 @@ class LLMProvider:
 
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 # Submit all tool executions with manual context propagation
+                # Filter out server-side tools (code_execution is executed by Anthropic, not us)
+                local_tool_calls = [tc for tc in tool_calls if tc["tool_name"] != "code_execution"]
                 future_to_tool = {
                     executor.submit(invoke_with_context, tc["tool_name"], tc["input"]): tc
-                    for tc in tool_calls
+                    for tc in local_tool_calls
                 }
 
                 # Process results as they complete
@@ -1114,7 +1221,28 @@ class LLMProvider:
                 self.logger.info(f"Circuit breaker triggered: {reason}")
                 yield CircuitBreakerEvent(reason=reason)
 
-                # Add all tool results in ONE user message
+                # Add tool results + instruction to respond without more tools
+                current_messages.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": r["tool_use_id"], "content": r["content"]}
+                        for r in tool_results
+                    ] + [
+                        {"type": "text", "text": f"[Automated system message: Tool call issue detected - {reason}. No more tool calls available. Provide your response to the user based on information gathered so far.]"}
+                    ]
+                })
+
+                # Get final response - pass tools=None to force text-only response
+                for event in self._stream_response(current_messages, None, model_override=self.model, **kwargs):
+                    if isinstance(event, CompleteEvent):
+                        yield event
+                        return
+                    else:
+                        yield event
+
+            # Add tool results in ONE user message (only if we have local tool results)
+            # Server-side tools (code_execution) are handled by Anthropic and don't need results from us
+            if tool_results:
                 current_messages.append({
                     "role": "user",
                     "content": [
@@ -1122,23 +1250,10 @@ class LLMProvider:
                         for r in tool_results
                     ]
                 })
-
-                # Get final response after circuit breaker
-                for event in self._stream_response(current_messages, tools, model_override=self.model, **kwargs):
-                    if isinstance(event, CompleteEvent):
-                        yield event
-                        return
-                    else:
-                        yield event
-
-            # Add all tool results in ONE user message
-            current_messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "tool_result", "tool_use_id": r["tool_use_id"], "content": r["content"]}
-                    for r in tool_results
-                ]
-            })
+            else:
+                # All tools were server-side (e.g., only code_execution) - continue to next iteration
+                # Anthropic will handle the execution and may call more tools
+                self.logger.debug("No local tool results - all tools executed server-side")
 
     def _validate_messages(self, messages: List[Dict[str, str]]) -> None:
         """Validate messages before sending to API."""
@@ -1147,7 +1262,7 @@ class LLMProvider:
             self.logger.error("Empty messages list detected")
             raise ValueError("Cannot send empty messages list to LLM API")
 
-        for msg in messages:
+        for idx, msg in enumerate(messages):
             content = msg.get('content', '')
             role = msg.get('role', 'unknown')
 
@@ -1159,6 +1274,21 @@ class LLMProvider:
             if not content or not str(content).strip():
                 self.logger.error(f"Empty {role} message detected in continuum")
                 raise ValueError(f"Cannot send empty {role} message to LLM API")
+
+            # Validate container_upload blocks have required file_id
+            if isinstance(content, list):
+                for block_idx, block in enumerate(content):
+                    if isinstance(block, dict) and block.get('type') == 'container_upload':
+                        # file_id is directly on the block, not nested in source
+                        file_id = block.get('file_id')
+                        if not file_id:
+                            self.logger.error(
+                                f"Malformed container_upload block in message {idx}, block {block_idx}: "
+                                f"missing file_id. Block: {block}"
+                            )
+                            raise ValueError(
+                                f"container_upload block in message {idx} is missing required file_id field"
+                            )
 
     def _build_assistant_message(self, message: anthropic.types.Message) -> Dict[str, Any]:
         """
@@ -1204,6 +1334,12 @@ class LLMProvider:
         """Handle Anthropic SDK errors and yield appropriate events."""
         status_code = error.status_code
         message = str(error)
+
+        # Check for container expiration (rare - 30 day TTL)
+        if "container" in message.lower() and ("expired" in message.lower() or "not found" in message.lower()):
+            self.logger.warning(f"Container expired or not found: {message}")
+            self.logger.warning("A new container will be created on next request with file upload")
+            # Fall through to general error handling - container_id will be replaced on next file upload
 
         if status_code == 401:
             self.logger.error("Authentication failed")

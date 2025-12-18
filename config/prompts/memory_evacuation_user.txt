@@ -1,0 +1,13 @@
+<extended_conversation>
+{conversation_turns}
+</extended_conversation>
+
+<current_message>
+{user_message}
+</current_message>
+
+<pinned_memories>
+{memories_block}
+</pinned_memories>
+
+Select the top {target_count} memories to keep. Return survivor IDs in <survivors> tags.

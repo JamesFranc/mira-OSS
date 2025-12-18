@@ -24,6 +24,7 @@ class Memory(BaseModel):
     updated_at: Optional[datetime] = None
     expires_at: Optional[datetime] = None
     access_count: int = 0
+    mention_count: int = 0  # Explicit LLM references (strongest importance signal)
     last_accessed: Optional[datetime] = None
     happens_at: Optional[datetime] = None
     inbound_links: List[Dict[str, Any]] = Field(default_factory=list)

@@ -5,6 +5,7 @@ MIRA Chat - Rich-based CLI for chatting with MIRA.
 Usage:
     python talkto_mira.py              # Interactive chat
     python talkto_mira.py --headless "message"  # One-shot query
+    python talkto_mira.py --show-key   # Display API key for curl/API usage
 
 TODO: Consider adding `questionary` for arrow-key selection menus on /model and /think.
       Works with Rich but has its own styling (prompt_toolkit-based).
@@ -75,37 +76,34 @@ def call_action(token: str, domain: str, action: str, data: dict = None) -> dict
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Preferences
+# Preferences (LLM Tier System)
 # ─────────────────────────────────────────────────────────────────────────────
 
-THINKING_LEVELS = {"off": 0, "low": 1024, "medium": 4096, "high": 32000, "default": None}
-THINKING_LABELS = {0: "off", 1024: "low", 4096: "medium", 32000: "high", None: "default"}
-MODEL_ALIASES = {"opus": "claude-opus-4-5-20251101", "haiku": "claude-haiku-4-5-20251001", "default": None}
-MODEL_LABELS = {"claude-opus-4-5-20251101": "opus", "claude-haiku-4-5-20251001": "haiku", None: "default"}
+# Tier definitions:
+# - fast: Haiku with quick thinking (1024 tokens)
+# - balanced: Sonnet with light reasoning (1024 tokens)
+# - nuanced: Opus with nuanced reasoning (8192 tokens)
+TIER_OPTIONS = ["fast", "balanced", "nuanced"]
+TIER_DESCRIPTIONS = {
+    "fast": "Haiku • Fast",
+    "balanced": "Sonnet • Balanced",
+    "nuanced": "Opus • Nuanced"
+}
 
 
-def get_preferences(token: str) -> tuple[str, str]:
-    model_resp = call_action(token, "continuum", "get_model_preference")
-    think_resp = call_action(token, "continuum", "get_thinking_budget_preference")
-    # API wraps handler results in {"success": ..., "data": {...}}
-    model_data = model_resp.get("data", {}) if model_resp.get("success") else {}
-    think_data = think_resp.get("data", {}) if think_resp.get("success") else {}
-    model = model_data.get("model")
-    budget = think_data.get("budget")
-    return MODEL_LABELS.get(model, model or "default"), THINKING_LABELS.get(budget, str(budget) if budget else "default")
+def get_tier(token: str) -> str:
+    """Get current LLM tier preference."""
+    resp = call_action(token, "continuum", "get_llm_tier")
+    if resp.get("success"):
+        return resp.get("tier", "balanced")
+    return "balanced"
 
 
-def set_model_preference(token: str, model_alias: str) -> bool:
-    if model_alias not in MODEL_ALIASES:
+def set_tier(token: str, tier: str) -> bool:
+    """Set LLM tier preference."""
+    if tier not in TIER_OPTIONS:
         return False
-    resp = call_action(token, "continuum", "set_model_preference", {"model": MODEL_ALIASES[model_alias]})
-    return resp.get("success", False)
-
-
-def set_thinking_preference(token: str, level: str) -> bool:
-    if level not in THINKING_LEVELS:
-        return False
-    resp = call_action(token, "continuum", "set_thinking_budget_preference", {"budget": THINKING_LEVELS[level]})
+    resp = call_action(token, "continuum", "set_llm_tier", {"tier": tier})
     return resp.get("success", False)
 
 
@@ -254,16 +252,13 @@ def render_mira_message(text: str, is_error: bool = False) -> None:
     console.print(panel)
 
 
-def render_status_bar(model: str, thinking: str) -> None:
-    """Render the status bar. Hides default values."""
-    # Build left side - only show non-default values
-    parts = []
-    if model != "default":
-        parts.append(model)
-    if thinking != "default":
-        parts.append(thinking)
+def render_status_bar(tier: str) -> None:
+    """Render the status bar. Shows tier description if not balanced."""
+    # Build left side - only show non-balanced tier
+    left_text = ""
+    if tier != "balanced":
+        left_text = TIER_DESCRIPTIONS.get(tier, tier)
 
-    left_text = " • ".join(parts) if parts else ""
     left = Text(f" {left_text}" if left_text else "", style="cyan")
     right = Text("/help • ctrl+c quit", style="dim")
 
@@ -274,8 +269,7 @@ def render_status_bar(model: str, thinking: str) -> None:
 
 def render_screen(
     history: list[tuple[str, str]],
-    model: str,
-    thinking: str,
+    tier: str,
     pending_user_msg: str = None,
     show_thinking: bool = False
 ) -> None:
@@ -313,7 +307,7 @@ def render_screen(
         console.print()
 
     # Status bar always last
-    render_status_bar(model, thinking)
+    render_status_bar(tier)
 
 
 class ThinkingAnimation:
@@ -380,19 +374,19 @@ def render_thinking() -> None:
 
 def chat_loop(token: str) -> None:
     history: list[tuple[str, str]] = []
-    model_pref, thinking_pref = get_preferences(token)
+    current_tier = get_tier(token)
 
     # Mutable state for resize handler (closures capture by reference for mutables)
-    prefs = {'model': model_pref, 'thinking': thinking_pref}
+    prefs = {'tier': current_tier}
 
     def handle_resize(signum, frame):
-        render_screen(history, prefs['model'], prefs['thinking'])
+        render_screen(history, prefs['tier'])
 
     # SIGWINCH is Unix-only (terminal window resize)
     if hasattr(signal, 'SIGWINCH'):
         signal.signal(signal.SIGWINCH, handle_resize)
 
-    render_screen(history, model_pref, thinking_pref)
+    render_screen(history, current_tier)
 
     while True:
         try:
@@ -416,55 +410,40 @@ def chat_loop(token: str) -> None:
 
             if cmd == "help":
                 console.print()
-                render_mira_message("/model [opus|haiku|default]\n/think [off|low|medium|high|default]\n/status\n/clear\nquit, exit, bye")
+                render_mira_message("/tier [fast|balanced|nuanced]\n/status\n/clear\nquit, exit, bye")
                 console.print()
 
             elif cmd == "status":
-                model_pref, thinking_pref = get_preferences(token)
-                prefs['model'], prefs['thinking'] = model_pref, thinking_pref
+                current_tier = get_tier(token)
+                prefs['tier'] = current_tier
+                tier_desc = TIER_DESCRIPTIONS.get(current_tier, current_tier)
                 console.print()
-                render_mira_message(f"Model: {model_pref}\nThinking: {thinking_pref}")
+                render_mira_message(f"Tier: {current_tier} ({tier_desc})")
                 console.print()
 
-            elif cmd == "model":
-                if arg and arg in MODEL_ALIASES:
-                    if set_model_preference(token, arg):
-                        model_pref = prefs['model'] = arg
-                        render_screen(history, model_pref, thinking_pref)
+            elif cmd == "tier":
+                if arg and arg in TIER_OPTIONS:
+                    if set_tier(token, arg):
+                        current_tier = prefs['tier'] = arg
+                        render_screen(history, current_tier)
                     else:
                         console.print()
-                        render_mira_message("Failed to set model", is_error=True)
+                        render_mira_message("Failed to set tier", is_error=True)
                         console.print()
                 elif arg:
                     console.print()
-                    render_mira_message("Options: opus, haiku, default", is_error=True)
+                    render_mira_message("Options: fast, balanced, nuanced", is_error=True)
                     console.print()
                 else:
+                    tier_desc = TIER_DESCRIPTIONS.get(current_tier, current_tier)
+                    tier_list = "\n".join([f"  {t}: {TIER_DESCRIPTIONS[t]}" for t in TIER_OPTIONS])
                     console.print()
-                    render_mira_message(f"Current: {model_pref}\nOptions: opus, haiku, default")
-                    console.print()
-
-            elif cmd == "think":
-                if arg and arg in THINKING_LEVELS:
-                    if set_thinking_preference(token, arg):
-                        thinking_pref = prefs['thinking'] = arg
-                        render_screen(history, model_pref, thinking_pref)
-                    else:
-                        console.print()
-                        render_mira_message("Failed to set thinking", is_error=True)
-                        console.print()
-                elif arg:
-                    console.print()
-                    render_mira_message("Options: off, low, medium, high, default", is_error=True)
-                    console.print()
-                else:
-                    console.print()
-                    render_mira_message(f"Current: {thinking_pref}\nOptions: off, low, medium, high, default")
+                    render_mira_message(f"Current: {current_tier} ({tier_desc})\n\nOptions:\n{tier_list}")
                     console.print()
 
             elif cmd == "clear":
                 history.clear()
-                render_screen(history, model_pref, thinking_pref)
+                render_screen(history, current_tier)
 
             else:
                 console.print()
@@ -474,7 +453,9 @@ def chat_loop(token: str) -> None:
             continue
 
         # Regular message - show thinking animation
-        render_screen(history, model_pref, thinking_pref, pending_user_msg=user_input, show_thinking=True)
+        # Note: Don't use show_thinking=True here - the animation handles its own rendering
+        # Using both creates duplicate indicators (one static above status bar, one animated below)
+        render_screen(history, current_tier, pending_user_msg=user_input, show_thinking=False)
         _thinking_animation.start()
 
         result = send_message(token, user_input)
@@ -487,7 +468,7 @@ def chat_loop(token: str) -> None:
             error = result.get("error", {}).get("message", "Unknown error")
             history.append((user_input, f"Error: {error}"))
 
-        render_screen(history, model_pref, thinking_pref)
+        render_screen(history, current_tier)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -503,10 +484,35 @@ def one_shot(token: str, message: str) -> None:
         sys.exit(1)
 
 
+def show_api_key() -> None:
+    """Display the MIRA API key and exit."""
+    try:
+        token = get_api_key('mira_api')
+        print(f"\nYour MIRA API Key: {token}\n")
+        print("Use with curl:")
+        print(f'  curl -H "Authorization: Bearer {token}" \\')
+        print(f'       -H "Content-Type: application/json" \\')
+        print(f'       -d \'{{"message": "Hello!"}}\' \\')
+        print(f'       {MIRA_API_URL}/v0/api/chat\n')
+    except Exception as e:
+        print(f"Error: Could not retrieve API key from Vault: {e}", file=sys.stderr)
+        print("\nMake sure:", file=sys.stderr)
+        print("  1. Vault is running and unsealed", file=sys.stderr)
+        print("  2. MIRA has been started at least once (creates the API key)", file=sys.stderr)
+        print("  3. VAULT_ROLE_ID and VAULT_SECRET_ID are set", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="MIRA Chat")
     parser.add_argument('--headless', type=str, help="One-shot message")
+    parser.add_argument('--show-key', action='store_true', help="Display API key and exit")
     args = parser.parse_args()
+
+    # Handle --show-key flag (exits immediately)
+    if args.show_key:
+        show_api_key()
+        sys.exit(0)
 
     server_started = False
     if not args.headless:

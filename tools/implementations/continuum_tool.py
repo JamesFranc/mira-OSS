@@ -117,7 +117,7 @@ class ContinuumSearchToolConfig(BaseModel):
     )
 
 
-registry.register("continuumsearch_tool", ContinuumSearchToolConfig)
+registry.register("continuum_tool", ContinuumSearchToolConfig)
 
 
 class ContinuumSearchTool(Tool):
@@ -132,12 +132,12 @@ class ContinuumSearchTool(Tool):
     where an LLM agent reads full continuum segments to find synthesized information.
     """
 
-    name = "continuumsearch_tool"
+    name = "continuum_tool"
 
     simple_description = "Search past conversations and extracted memories with immediate results. Hybrid vector+BM25 search finds relevant segments, messages, or memories. Use when you need synchronous search of conversation history."
 
     anthropic_schema = {
-        "name": "continuumsearch_tool",
+        "name": "continuum_tool",
         "description": (
             "Search conversation history or long-term memories using hybrid vector+BM25 search. "
             "For conversations: start with 'search' on summaries (default) to find relevant segments. "
@@ -258,7 +258,7 @@ class ContinuumSearchTool(Tool):
         self.logger = logging.getLogger(__name__)
 
         # Load configuration
-        config_cls = registry.get("continuumsearch_tool") or ContinuumSearchToolConfig
+        config_cls = registry.get("continuum_tool") or ContinuumSearchToolConfig
         self._config = config_cls()
 
         # Get continuum repository for database access
@@ -270,6 +270,43 @@ class ContinuumSearchTool(Tool):
     def _escape_like_pattern(self, value: str) -> str:
         """Escape SQL LIKE special characters to prevent wildcard injection."""
         return value.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+
+    def _coerce_to_int(self, value: Any, param_name: str) -> Optional[int]:
+        """
+        Coerce a value to int, handling LLM quirks like sending [10] instead of 10.
+
+        Args:
+            value: The value to coerce (may be int, list, str, or None)
+            param_name: Parameter name for error messages
+
+        Returns:
+            Integer value or None if input was None
+
+        Raises:
+            ValueError: If value cannot be coerced to int
+        """
+        if value is None:
+            return None
+
+        # Handle list with single element (LLM quirk)
+        if isinstance(value, (list, tuple)):
+            if len(value) == 1:
+                value = value[0]
+            else:
+                raise ValueError(f"{param_name} must be a single integer, got list with {len(value)} elements")
+
+        # Handle string numbers
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                raise ValueError(f"{param_name} must be an integer, got string '{value}'")
+
+        # Handle numeric types
+        if isinstance(value, (int, float)):
+            return int(value)
+
+        raise ValueError(f"{param_name} must be an integer, got {type(value).__name__}")
 
     # Parameter sets for each operation to filter kwargs
     _SEARCH_PARAMS = {
@@ -310,7 +347,7 @@ class ContinuumSearchTool(Tool):
                     f"Valid operations are: search, search_within_segment, expand_message"
                 )
         except Exception as e:
-            self.logger.error(f"Error executing {operation} in continuumsearch_tool: {e}")
+            self.logger.error(f"Error executing {operation} in continuum_tool: {e}")
             raise
 
     def _search_messages(
@@ -347,6 +384,10 @@ class ContinuumSearchTool(Tool):
 
         query = query.strip()
         entities = entities or []
+
+        # Validate numeric parameters - LLM sometimes sends lists instead of scalars
+        max_results = self._coerce_to_int(max_results, "max_results")
+        page = self._coerce_to_int(page, "page") or 1
 
         # Validate search mode
         if search_mode not in ["summaries", "messages", "memories"]:
@@ -455,12 +496,13 @@ class ContinuumSearchTool(Tool):
         # Hybrid search query - temporal_clause is SQL structure, not data
         search_sql = f"""
             WITH vector_search AS (
-                -- Vector similarity search on segment embeddings
+                -- Vector similarity search on segment embeddings (uses HNSW index)
                 SELECT
                     m.id,
                     m.continuum_id,
                     m.created_at,
                     m.metadata,
+                    m.content,
                     1 - (m.segment_embedding <=> %s::vector) AS vector_score
                 FROM messages m
                 WHERE m.metadata->>'is_segment_boundary' = 'true'
@@ -471,23 +513,24 @@ class ContinuumSearchTool(Tool):
                 LIMIT %s
             ),
             text_search AS (
-                -- BM25 text search on segment summaries
+                -- BM25 text search on segment summaries (stored in content field)
                 SELECT
                     m.id,
                     ts_rank_cd(
-                        to_tsvector('english', m.metadata->>'summary'),
+                        to_tsvector('english', m.content),
                         plainto_tsquery('english', %s)
                     ) AS text_rank
                 FROM messages m
                 WHERE m.id IN (SELECT id FROM vector_search)
-                  AND m.metadata->>'summary' IS NOT NULL
-                  AND to_tsvector('english', m.metadata->>'summary') @@ plainto_tsquery('english', %s)
+                  AND m.content IS NOT NULL
+                  AND to_tsvector('english', m.content) @@ plainto_tsquery('english', %s)
             )
             SELECT
                 v.id,
                 v.continuum_id,
                 v.created_at,
                 v.metadata,
+                v.content,
                 v.vector_score,
                 COALESCE(t.text_rank, 0.0) AS text_rank,
                 -- Hybrid score: tanh normalizes BM25 (unbounded) to [0,1] to match vector_score range
@@ -506,15 +549,16 @@ class ContinuumSearchTool(Tool):
             self._config.max_vector_candidates
         )
         # Build params in SQL placeholder order:
-        # 1. embedding for vector score (line 562)
-        # 2. temporal_params for WHERE clause (line 567) - if present
-        # 3. embedding for ORDER BY (line 568)
-        # 4. vector_limit for LIMIT (line 569)
-        # 5. query params for text search (lines 577, 582)
-        # 6. offset and limit for final pagination (lines 596, 597)
+        # 1. embedding for vector_score calculation
+        # 2. temporal_params for WHERE clause (if present)
+        # 3. embedding for ORDER BY (HNSW index)
+        # 4. vector_limit for LIMIT
+        # 5. query params for text search (x2)
+        # 6. offset and limit for final pagination
         params = [embedding_str]
         params.extend(temporal_params)  # Add temporal filter params if any
-        params.extend([embedding_str, vector_limit])
+        params.extend([embedding_str])  # ORDER BY uses HNSW index
+        params.extend([vector_limit])
         params.extend([query, query])  # Text search params
         params.extend([offset, limit])  # Pagination params
 
@@ -533,11 +577,14 @@ class ContinuumSearchTool(Tool):
                 self.logger.warning(f"Malformed metadata in segment {row.get('id')}: {type(metadata)}")
                 metadata = {}
 
+            # Get summary from content field (not metadata)
+            summary = row.get("content") or ""
+
             # Entity boosting
             boost = 1.0
             matched_entities = []
-            if entities and metadata.get("summary"):
-                summary_lower = metadata["summary"].lower()
+            if entities and summary:
+                summary_lower = summary.lower()
                 for entity in entities:
                     if entity.lower() in summary_lower:
                         matched_entities.append(entity)
@@ -548,7 +595,7 @@ class ContinuumSearchTool(Tool):
                 "result_type": "segment_summary",
                 "segment_id": str(row["id"])[:8],
                 "display_title": metadata.get("display_title", "Conversation segment"),
-                "summary": metadata.get("summary", "No summary available"),
+                "summary": summary or "No summary available",
                 "confidence_score": min(row["hybrid_score"] * boost, 1.0),
                 "time_boundaries": {
                     "start": metadata.get("segment_start_time"),
@@ -1004,6 +1051,9 @@ class ContinuumSearchTool(Tool):
         if not query or not query.strip():
             raise ValueError("Query is required for search_within_segment operation")
 
+        # Validate numeric parameter
+        max_results = self._coerce_to_int(max_results, "max_results")
+
         # Find the full segment sentinel
         db = self._conversation_repo._get_client(self.user_id)
 
@@ -1095,7 +1145,8 @@ class ContinuumSearchTool(Tool):
         if direction not in ["before", "after", "both"]:
             raise ValueError(f"direction must be 'before', 'after', or 'both', got: {direction}")
 
-        # Set context count
+        # Validate and set context count
+        context_count = self._coerce_to_int(context_count, "context_count")
         if context_count is None:
             context_count = self._config.default_context_window
         context_count = max(0, min(context_count, 10))

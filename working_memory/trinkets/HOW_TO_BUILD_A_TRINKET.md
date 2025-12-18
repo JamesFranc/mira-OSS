@@ -258,12 +258,12 @@ def generate_content(self, context: Dict[str, Any]) -> str:
 
 ```python
 from utils.timezone_utils import convert_from_utc, format_datetime
-from utils.user_context import get_user_timezone
+from utils.user_context import get_user_preferences
 
 def _format_timestamp(self, utc_timestamp: str) -> str:
     """Convert UTC timestamp to user's timezone."""
     try:
-        user_tz = get_user_timezone()
+        user_tz = get_user_preferences().timezone
     except RuntimeError:
         user_tz = "UTC"  # Fallback if not configured
 
@@ -307,7 +307,7 @@ from datetime import datetime
 
 from .base import EventAwareTrinket
 from utils.timezone_utils import utc_now, format_datetime, convert_from_utc
-from utils.user_context import get_current_user_id, get_user_timezone
+from utils.user_context import get_current_user_id, get_user_preferences
 
 logger = logging.getLogger(__name__)
 
@@ -390,7 +390,7 @@ class SessionMonitorTrinket(EventAwareTrinket):
             return ""  # No content if no sessions
 
         try:
-            user_tz = get_user_timezone()
+            user_tz = get_user_preferences().timezone
         except RuntimeError:
             user_tz = "UTC"
 

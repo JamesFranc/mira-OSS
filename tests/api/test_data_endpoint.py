@@ -48,7 +48,7 @@ class TestDataEndpointValidation:
 
     def test_data_accepts_valid_types(self, authenticated_client: TestClient):
         """Verify /data accepts all valid type parameters."""
-        valid_types = ["history", "memories", "dashboard", "user", "linked_days", "domains"]
+        valid_types = ["history", "memories", "dashboard", "user", "linked_days", "domaindocs"]
 
         for data_type in valid_types:
             response = authenticated_client.get(f"/data?type={data_type}")
@@ -269,26 +269,26 @@ class TestDataEndpointLinkedDaysType:
         assert "count" in linked_days_data or "total" in linked_days_data
 
 
-class TestDataEndpointDomainsType:
-    """Test /data?type=domains endpoint."""
+class TestDataEndpointDomaindocsType:
+    """Test /data?type=domaindocs endpoint."""
 
-    def test_domains_returns_domain_list(self, authenticated_client: TestClient):
-        """Verify domains returns list of domain knowledge blocks."""
-        response = authenticated_client.get("/v0/v0/api/data?type=domains")
+    def test_domaindocs_returns_list(self, authenticated_client: TestClient):
+        """Verify domaindocs returns list of domain knowledge blocks."""
+        response = authenticated_client.get("/v0/v0/api/data?type=domaindocs")
 
         assert response.status_code == 200
         data = response.json()
 
         # Verify response structure
         assert data["success"] is True
-        domains_data = data["data"]
+        domaindocs_data = data["data"]
 
-        assert "domains" in domains_data
-        assert isinstance(domains_data["domains"], list)
+        assert "domaindocs" in domaindocs_data
+        assert isinstance(domaindocs_data["domaindocs"], list)
 
-    def test_domains_filters_by_label(self, authenticated_client: TestClient):
-        """Verify domains can filter by specific domain label."""
-        response = authenticated_client.get("/v0/v0/api/data?type=domains&domain_label=work")
+    def test_domaindocs_filters_by_label(self, authenticated_client: TestClient):
+        """Verify domaindocs can filter by specific domain label."""
+        response = authenticated_client.get("/v0/v0/api/data?type=domaindocs&domain_label=work")
 
         # Should succeed even if no domain with that label exists
         assert response.status_code == 200

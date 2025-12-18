@@ -10,7 +10,7 @@ from datetime import datetime
 from uuid import uuid4
 
 from cns.core.message import Message
-from utils.timezone_utils import utc_now
+from utils.timezone_utils import utc_now, parse_utc_time_string
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ def create_segment_boundary_sentinel(
     """
     Create segment boundary sentinel message.
 
-    Sentinel is created in 'active' status when second message arrives.
+    Sentinel is created in 'active' status when the first message arrives.
     Summary and embedding are added during collapse.
 
     Args:
@@ -38,6 +38,7 @@ def create_segment_boundary_sentinel(
         'segment_id': str(uuid4()),  # Unique segment identifier
         'segment_start_time': first_message_time.isoformat(),
         'segment_end_time': first_message_time.isoformat(),  # Will update as messages arrive
+        'segment_turn_count': 1,  # Initialized to 1 since creation happens on first turn
         'tools_used': [],
         'memories_extracted': False,
         'domain_blocks_updated': False
@@ -196,8 +197,8 @@ def get_segment_time_range(sentinel: Message) -> tuple[datetime, datetime]:
     start_str = sentinel.metadata.get('segment_start_time')
     end_str = sentinel.metadata.get('segment_end_time')
 
-    start_time = datetime.fromisoformat(start_str) if start_str else utc_now()
-    end_time = datetime.fromisoformat(end_str) if end_str else utc_now()
+    start_time = parse_utc_time_string(start_str) if start_str else utc_now()
+    end_time = parse_utc_time_string(end_str) if end_str else utc_now()
 
     return start_time, end_time
 
@@ -226,7 +227,7 @@ def format_segment_for_display(sentinel: Message) -> str:
     start_time_iso = sentinel.metadata['segment_start_time']
 
     # Convert ISO timestamp to datetime object
-    start_time = datetime.fromisoformat(start_time_iso)
+    start_time = parse_utc_time_string(start_time_iso)
 
     # Format as relative time (grouped timeframe using segment start)
     relative_time = format_relative_time(start_time)
@@ -265,7 +266,7 @@ def create_session_boundary_marker(segment_summaries: List[Message]) -> Message:
         Message with session_break notification type
     """
     from utils.timezone_utils import convert_from_utc, format_datetime
-    from utils.user_context import get_user_timezone
+    from utils.user_context import get_user_preferences
 
     current_time = utc_now()
 
@@ -276,7 +277,7 @@ def create_session_boundary_marker(segment_summaries: List[Message]) -> Message:
         end_time_str = last_segment.metadata.get('segment_end_time')
 
         if end_time_str:
-            last_session_end = datetime.fromisoformat(end_time_str)
+            last_session_end = parse_utc_time_string(end_time_str)
         else:
             # Fallback to segment creation time if no end_time
             last_session_end = last_segment.created_at
@@ -284,7 +285,7 @@ def create_session_boundary_marker(segment_summaries: List[Message]) -> Message:
         # No previous segments - this is the first conversation
         # Show a generic message without specific end time
         try:
-            user_tz = get_user_timezone()
+            user_tz = get_user_preferences().timezone
         except Exception:
             user_tz = 'UTC'
 
@@ -299,7 +300,7 @@ def create_session_boundary_marker(segment_summaries: List[Message]) -> Message:
 
     # Convert times to user timezone
     try:
-        user_tz = get_user_timezone()
+        user_tz = get_user_preferences().timezone
     except Exception:
         user_tz = 'UTC'
 

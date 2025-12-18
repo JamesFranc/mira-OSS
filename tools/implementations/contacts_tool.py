@@ -28,12 +28,12 @@ from tools.registry import registry
 class ContactsToolConfig(BaseModel):
     """
     Configuration for the contacts_tool.
-    
+
     Defines the parameters that control the contacts tool's behavior.
     """
     # Standard configuration parameter - all tools should include this
     enabled: bool = Field(
-        default=False,
+        default=True,
         description="Whether this tool is enabled by default"
     )
 
@@ -77,17 +77,33 @@ class ContactsTool(Tool):
                         "type": "string",
                         "description": "Contact's phone number (optional)"
                     },
-                    "pager_address": {
+                    "street": {
                         "type": "string",
-                        "description": "Contact's pager address - local username or user@domain (optional)"
+                        "description": "Street address (optional)"
+                    },
+                    "city": {
+                        "type": "string",
+                        "description": "City (optional)"
+                    },
+                    "state": {
+                        "type": "string",
+                        "description": "State (optional)"
+                    },
+                    "zip": {
+                        "type": "string",
+                        "description": "ZIP code (optional)"
                     },
                     "identifier": {
                         "type": "string",
                         "description": "Contact UUID or name to search for/update/delete (required for get_contact, delete_contact, update_contact)"
+                    },
+                    "contacts": {
+                        "type": "string",
+                        "description": "JSON array of contacts for batch add_contact operations. Each contact should have name, email, phone, street, city, state, zip fields. Use this instead of individual fields for bulk imports."
                     }
                 },
                 "required": ["operation"],
-                "additionalProperties": False
+                "additionalProperties": True
             }
         }
 
@@ -178,6 +194,10 @@ class ContactsTool(Tool):
                     self.logger.error(f"Invalid JSON in kwargs for contacts_tool: {e}")
                     raise ValueError(f"Invalid JSON in kwargs: {e}")
             
+            # Handle batch contact operations
+            if operation == "add_contact" and "contacts" in kwargs:
+                return self._batch_add_contacts(kwargs.get("contacts"))
+
             # Route to the appropriate operation
             if operation == "add_contact":
                 return self._add_contact(**kwargs)
@@ -200,6 +220,8 @@ class ContactsTool(Tool):
             raise
     
     def _add_contact(self, name: str, email: Optional[str] = None, phone: Optional[str] = None,
+                    street: Optional[str] = None, city: Optional[str] = None,
+                    state: Optional[str] = None, zip: Optional[str] = None,
                     pager_address: Optional[str] = None) -> Dict[str, Any]:
         """
         Add a new contact.
@@ -208,6 +230,10 @@ class ContactsTool(Tool):
             name: Contact's full name
             email: Contact's email address
             phone: Contact's phone number
+            street: Street address
+            city: City
+            state: State
+            zip: ZIP code
             pager_address: Contact's pager address (username or user@domain)
 
         Returns:
@@ -220,9 +246,16 @@ class ContactsTool(Tool):
         # Check duplicates by loading and comparing decrypted names (name is encrypted at rest)
         existing = self.db.select('contacts')
         name_lower = name.strip().lower()
-        if any((c.get('encrypted__name') or '').strip().lower() == name_lower for c in existing):
-            self.logger.error(f"Duplicate contact name '{name}' in contacts_tool")
-            raise ValueError(f"Contact with name '{name}' already exists")
+        for contact in existing:
+            if (contact.get('encrypted__name') or '').strip().lower() == name_lower:
+                # Found duplicate - return existing contact politely
+                self.logger.info(f"Contact '{name}' already exists, returning existing contact")
+                return {
+                    "success": True,
+                    "duplicate": True,
+                    "contact": contact,
+                    "message": f"Contact '{name}' already exists (returning existing contact)"
+                }
         
         # Create new contact
         contact_id = str(uuid.uuid4())
@@ -233,6 +266,10 @@ class ContactsTool(Tool):
             'encrypted__name': name,
             'encrypted__email': email,
             'encrypted__phone': phone,
+            'encrypted__street': street,
+            'encrypted__city': city,
+            'encrypted__state': state,
+            'encrypted__zip': zip,
             'encrypted__pager_address': pager_address,
             'created_at': timestamp,
             'updated_at': timestamp
@@ -249,13 +286,70 @@ class ContactsTool(Tool):
                 "encrypted__name": name,
                 "encrypted__email": email,
                 "encrypted__phone": phone,
+                "encrypted__street": street,
+                "encrypted__city": city,
+                "encrypted__state": state,
+                "encrypted__zip": zip,
                 "encrypted__pager_address": pager_address,
                 "created_at": timestamp,
                 "updated_at": timestamp
             },
             "message": f"Added contact {name}"
         }
-    
+
+    def _batch_add_contacts(self, contacts_json: str) -> Dict[str, Any]:
+        """
+        Add multiple contacts from JSON array.
+
+        Args:
+            contacts_json: JSON string containing array of contact objects
+
+        Returns:
+            Dict containing batch operation results
+        """
+        try:
+            contacts = json.loads(contacts_json)
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Invalid JSON in contacts array: {e}")
+            raise ValueError(f"Invalid JSON in contacts array: {e}")
+
+        if not isinstance(contacts, list):
+            raise ValueError("contacts must be a JSON array")
+
+        results = []
+        added = 0
+        duplicates = 0
+        errors = []
+
+        for contact in contacts:
+            try:
+                result = self._add_contact(
+                    name=contact.get('name'),
+                    email=contact.get('email'),
+                    phone=contact.get('phone'),
+                    street=contact.get('street'),
+                    city=contact.get('city'),
+                    state=contact.get('state'),
+                    zip=contact.get('zip'),
+                    pager_address=contact.get('pager_address')
+                )
+                if result.get('duplicate'):
+                    duplicates += 1
+                else:
+                    added += 1
+                results.append(result)
+            except Exception as e:
+                errors.append(f"{contact.get('name', 'unknown')}: {str(e)}")
+
+        return {
+            "success": True,
+            "added": added,
+            "duplicates": duplicates,
+            "errors": errors,
+            "total": len(contacts),
+            "message": f"Batch add complete: {added} added, {duplicates} duplicates, {len(errors)} errors"
+        }
+
     def _get_contact(self, identifier: str) -> Dict[str, Any]:
         """
         Get contact details by UUID or name.

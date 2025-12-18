@@ -31,6 +31,12 @@ FINGERPRINT RULES:
 
 When previous memories are provided, decide which ones stay relevant as the conversation evolves.
 
+Each memory is shown with an 8-character ID and importance indicator:
+`- a1b2c3d4 [●●●○○] - Memory text here`
+
+### Importance Indicator
+The 5-dot score [●●●●●] to [●○○○○] reflects the system's calculated importance based on access frequency and connectivity. Use as a hint, not a mandate - context can override low scores if the memory is directly relevant to current conversation.
+
 This prevents stale memories from cluttering context. If the user was discussing work projects but switched to planning a vacation, work memories should be dropped.
 
 RETENTION RULES:
@@ -38,6 +44,7 @@ RETENTION RULES:
 2. [ ] = memory is no longer relevant, drop it
 3. Keep memories that provide useful background even if not directly mentioned
 4. Drop memories about topics the conversation has moved past
+5. CRITICAL: Copy the 8-char ID exactly in your response. The system matches by ID only.
 
 ## OUTPUT FORMAT
 
@@ -46,8 +53,8 @@ RETENTION RULES:
 </fingerprint>
 
 <memory_retention>
-[x] relevant memory text
-[ ] irrelevant memory text
+[x] - a1b2c3d4 - relevant memory text
+[ ] - e5f6g7h8 - irrelevant memory text
 </memory_retention>
 
 No explanation - only the structured blocks.

@@ -27,8 +27,6 @@ class Continuum:
         """Initialize continuum with state."""
         self._state = state
         self._message_cache = []  # Hot cache of recent messages
-        self._thinking_budget_preference: Optional[int] = None  # User's thinking budget preference for this conversation
-        self._model_preference: Optional[str] = None  # User's model preference for this conversation
 
     @classmethod
     def create_new(cls, user_id: str) -> 'Continuum':
@@ -53,54 +51,6 @@ class Continuum:
     def messages(self) -> List[Message]:
         """Get cached messages - must be initialized through ContinuumPool."""
         return self._message_cache
-
-    @property
-    def thinking_budget_preference(self) -> Optional[int]:
-        """
-        Get user's thinking budget preference for this conversation.
-
-        Returns:
-            None: Use system config default
-            0: Explicitly disable thinking
-            Positive int: Explicitly enable with specific budget
-        """
-        return self._thinking_budget_preference
-
-    def set_thinking_budget_preference(self, budget: Optional[int]) -> None:
-        """
-        Set user's thinking budget preference for this conversation.
-
-        Args:
-            budget: None (system default), 0 (disabled), or positive int (enabled with budget)
-
-        Raises:
-            ValueError: If budget is negative or not a valid value
-        """
-        if budget is not None and budget < 0:
-            raise ValueError("Thinking budget must be None, 0, or a positive integer")
-        self._thinking_budget_preference = budget
-        logger.debug(f"Set thinking budget preference to {budget} for continuum {self.id}")
-
-    @property
-    def model_preference(self) -> Optional[str]:
-        """
-        Get user's model preference for this conversation.
-
-        Returns:
-            None: Use system config default
-            str: Model identifier to use
-        """
-        return self._model_preference
-
-    def set_model_preference(self, model: Optional[str]) -> None:
-        """
-        Set user's model preference for this conversation.
-
-        Args:
-            model: None (system default) or model identifier string
-        """
-        self._model_preference = model
-        logger.debug(f"Set model preference to {model} for continuum {self.id}")
 
     def apply_cache(self, messages: List[Message]) -> None:
         """

@@ -15,7 +15,7 @@ from fastapi.encoders import jsonable_encoder
 from utils.user_context import get_current_user_id
 from auth.api import get_current_user
 from .base import BaseHandler, ValidationError, NotFoundError
-from utils.timezone_utils import utc_now, format_utc_iso
+from utils.timezone_utils import utc_now, format_utc_iso, parse_utc_time_string
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,8 @@ class DataType(str, Enum):
     MEMORIES = "memories"
     DASHBOARD = "dashboard"
     USER = "user"
-    DOMAINS = "domains"
+    DOMAINDOCS = "domaindocs"
+    WORKING_MEMORY = "working_memory"
 
 
 class DataEndpoint(BaseHandler):
@@ -53,8 +54,10 @@ class DataEndpoint(BaseHandler):
             return self._get_dashboard(**request_params)
         elif data_type == DataType.USER:
             return self._get_user(**request_params)
-        elif data_type == DataType.DOMAINS:
+        elif data_type == DataType.DOMAINDOCS:
             return self._get_domains(**request_params)
+        elif data_type == DataType.WORKING_MEMORY:
+            return self._get_working_memory(**request_params)
         else:
             raise ValidationError(f"Invalid data type: {data_type}")
     
@@ -86,9 +89,9 @@ class DataEndpoint(BaseHandler):
             start_dt = None
             end_dt = None
             if start_date:
-                start_dt = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                start_dt = parse_utc_time_string(start_date.replace('Z', '+00:00'))
             if end_date:
-                end_dt = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                end_dt = parse_utc_time_string(end_date.replace('Z', '+00:00'))
 
             history_data = repo.get_history(
                 user_id=user_id,
@@ -227,56 +230,133 @@ class DataEndpoint(BaseHandler):
         }
 
     def _get_domains(self, **params) -> Dict[str, Any]:
-        """Get domain knowledge blocks."""
-        from cns.services.domain_knowledge_service import get_domain_knowledge_service
+        """Get domaindocs from SQLite storage."""
+        from utils.userdata_manager import get_user_data_manager
 
         user_id = get_current_user_id()
+        db = get_user_data_manager(user_id)
 
-        service = get_domain_knowledge_service()
-        if not service:
+        label = params.get('label')
+
+        if label:
+            # Get specific domaindoc with sections
+            results = db.select("domaindocs", "label = :label", {"label": label})
+            if not results:
+                raise NotFoundError("domaindoc", label)
+
+            doc = results[0]
+
+            # Get sections for this domaindoc
+            sections = db.fetchall(
+                "SELECT header, encrypted__content, sort_order, collapsed, parent_section_id "
+                "FROM domaindoc_sections WHERE domaindoc_id = :doc_id ORDER BY sort_order",
+                {"doc_id": doc["id"]}
+            )
+
+            # Build content from sections
+            content_parts = []
+            for sec in sections:
+                decrypted = db._decrypt_dict(sec)
+                header = decrypted.get("header", "")
+                section_content = decrypted.get("encrypted__content", "")
+                content_parts.append(f"## {header}\n{section_content}")
+
             return {
-                "domains": [],
-                "enabled": False,
-                "message": "Domain knowledge feature not available"
+                "label": label,
+                "name": doc.get("name", label),
+                "content": "\n\n".join(content_parts),
+                "enabled": doc.get("enabled", False),
+                "description": doc.get("description"),
+                "created_at": doc.get("created_at"),
+                "updated_at": doc.get("updated_at")
             }
 
-        domain_label = params.get('domain_label')
-
-        # If specific domain requested, get its content
-        if domain_label:
-            try:
-                content = service.get_block_content(
-                    domain_label=domain_label,
-                    prompt_formatted=False
-                )
-
-                if content is None:
-                    raise NotFoundError("domain", domain_label)
-
-                # Get domain metadata
-                all_domains = service.get_all_domains()
-                domain_info = next((d for d in all_domains if d['domain_label'] == domain_label), None)
-
-                return {
-                    "domain_label": domain_label,
-                    "domain_name": domain_info.get('domain_name') if domain_info else domain_label,
-                    "content": content,
-                    "enabled": domain_info.get('enabled', False) if domain_info else False,
-                    "block_description": domain_info.get('block_description') if domain_info else None
-                }
-            except Exception as e:
-                logger.error(f"Failed to get domain content: {e}")
-                raise
-
-        # Otherwise list all domains
-        domains = service.get_all_domains()
-        enabled_count = sum(1 for d in domains if d.get('enabled', False))
+        # List all domaindocs
+        all_docs = db.fetchall("SELECT * FROM domaindocs ORDER BY label")
+        domain_list = [
+            {
+                "label": doc.get("label"),
+                "name": doc.get("name", doc.get("label")),
+                "description": doc.get("description", ""),
+                "enabled": doc.get("enabled", False),
+                "created_at": doc.get("created_at"),
+                "updated_at": doc.get("updated_at")
+            }
+            for doc in all_docs
+        ]
+        enabled_count = sum(1 for d in domain_list if d.get("enabled", False))
 
         return {
-            "domains": domains,
-            "total_count": len(domains),
-            "enabled_count": enabled_count,
-            "enabled": True
+            "domaindocs": domain_list,
+            "total_count": len(domain_list),
+            "enabled_count": enabled_count
+        }
+
+    def _get_working_memory(self, **params) -> Dict[str, Any]:
+        """Get current working memory trinket states from Valkey.
+
+        If 'section' param provided, returns only that trinket's content.
+        Otherwise returns all trinkets.
+        """
+        section_filter = params.get('section')
+
+        if section_filter:
+            return self._get_trinket_section(section_filter)
+
+        # All sections: get keys and query each
+        return self._get_all_trinket_sections()
+
+    def _get_trinket_section(self, section_name: str) -> Dict[str, Any]:
+        """Get a single trinket section from Valkey."""
+        from clients.valkey_client import get_valkey_client
+        from working_memory.trinkets.base import TRINKET_KEY_PREFIX
+        import json
+
+        user_id = get_current_user_id()
+        hash_key = f"{TRINKET_KEY_PREFIX}:{user_id}"
+
+        valkey = get_valkey_client()
+        json_value = valkey.hget_with_retry(hash_key, section_name)
+
+        if json_value is None:
+            raise NotFoundError("trinket", section_name)
+
+        try:
+            data = json.loads(json_value)
+            return {
+                "section_name": section_name,
+                "content": data.get("content", ""),
+                "cache_policy": data.get("cache_policy", False),
+                "last_updated": data.get("updated_at")
+            }
+        except json.JSONDecodeError:
+            raise ValidationError(f"Invalid cached data for section: {section_name}")
+
+    def _get_all_trinket_sections(self) -> Dict[str, Any]:
+        """Get all trinket sections by querying each one."""
+        from clients.valkey_client import get_valkey_client
+        from working_memory.trinkets.base import TRINKET_KEY_PREFIX
+
+        user_id = get_current_user_id()
+        hash_key = f"{TRINKET_KEY_PREFIX}:{user_id}"
+
+        valkey = get_valkey_client()
+        section_names = valkey._client.hkeys(hash_key)
+
+        trinkets = []
+        for section_name in section_names:
+            try:
+                trinkets.append(self._get_trinket_section(section_name))
+            except (NotFoundError, ValidationError) as e:
+                logger.warning(f"Skipping invalid trinket section {section_name}: {e}")
+                continue
+
+        return {
+            "trinkets": trinkets,
+            "meta": {
+                "trinket_count": len(trinkets),
+                "loaded_at": format_utc_iso(utc_now())
+            }
         }
 
 
@@ -296,7 +376,8 @@ async def data_endpoint(
     fields: Optional[str] = Query(None, description="Comma-separated field selection"),
     search: Optional[str] = Query(None, description="Search query for full-text search"),
     message_type: Optional[str] = Query(None, description="Message type filter: 'regular', 'summaries', or 'all' (default='regular')"),
-    domain_label: Optional[str] = Query(None, description="Specific domain label to retrieve (for type=domains)"),
+    label: Optional[str] = Query(None, description="Domain label to retrieve (for type=domaindocs)"),
+    section: Optional[str] = Query(None, description="Specific trinket section to retrieve (for type=working_memory)"),
     current_user: dict = Depends(get_current_user)
 ):
     """Unified data access endpoint."""
@@ -321,8 +402,10 @@ async def data_endpoint(
             request_params['search'] = search
         if message_type is not None:
             request_params['message_type'] = message_type
-        if domain_label is not None:
-            request_params['domain_label'] = domain_label
+        if label is not None:
+            request_params['label'] = label
+        if section is not None:
+            request_params['section'] = section
 
         response = handler.handle_request(
             data_type=type,

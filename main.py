@@ -12,8 +12,6 @@ import os
 import signal
 import threading
 from contextlib import asynccontextmanager
-
-from typing import Optional
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -25,6 +23,7 @@ from pydantic import ValidationError
 from config.config_manager import config
 from cns.api import data, actions, health, tool_config
 from cns.api import chat as chat_api
+from api import federation as federation_api
 from cns.api.base import APIError, create_error_response, generate_request_id
 from utils.scheduler_service import scheduler_service
 from utils.scheduled_tasks import initialize_all_scheduled_tasks
@@ -94,6 +93,7 @@ def ensure_single_user(app: FastAPI) -> None:
                 'segment_id': segment_id,
                 'segment_start_time': utc_now().isoformat(),
                 'segment_end_time': utc_now().isoformat(),
+                'segment_turn_count': 1,  # Required for increment_segment_turn()
                 'tools_used': [],
                 'memories_extracted': False,
                 'domain_blocks_updated': False
@@ -111,6 +111,11 @@ def ensure_single_user(app: FastAPI) -> None:
             })
 
             logger.info(f"Created user {user_id} with continuum {continuum_id} and starter messages")
+
+            # Prepopulate default domaindoc
+            from auth.prepopulate_domaindoc import prepopulate_user_domaindoc
+            prepopulate_user_domaindoc(user_id)
+            logger.info(f"Prepopulated domaindoc for user {user_id}")
 
             api_key = f"mira_{secrets.token_urlsafe(32)}"
 
@@ -284,8 +289,28 @@ async def lifespan(app: FastAPI):
     if vault_status["status"] != "success":
         logger.warning(f"Vault connection issue: {vault_status['message']}")
 
-    # Federation services moved to separate repository
-    # See https://github.com/taylorsatula/gossip-federation for federation support
+    # Register Lattice username resolver for federation
+    # This allows Lattice to resolve usernames to user_ids for inbound message delivery
+    try:
+        from lattice.username_resolver import set_username_resolver
+        from clients.postgres_client import PostgresClient
+        from typing import Optional
+
+        def mira_resolve_username(username: str) -> Optional[str]:
+            """Resolve username to user_id for Lattice federation."""
+            db = PostgresClient("mira_service")
+            result = db.execute_single(
+                "SELECT user_id FROM global_usernames WHERE username = %(username)s AND active = true",
+                {"username": username.lower()}
+            )
+            return str(result["user_id"]) if result else None
+
+        set_username_resolver(mira_resolve_username)
+        logger.info("Lattice username resolver registered")
+    except ImportError:
+        logger.warning("Lattice package not available - federation disabled")
+    except Exception as e:
+        logger.warning(f"Failed to register Lattice username resolver: {e}")
 
     logger.info("MIRA startup complete")
     
@@ -333,6 +358,11 @@ async def lifespan(app: FastAPI):
             logger.info("PlaywrightService shutdown complete")
     except Exception as e:
         logger.warning(f"Error shutting down PlaywrightService: {e}")
+
+    # Clean up UserDataManager SQLite connections
+    from utils.userdata_manager import clear_manager_cache
+    clear_manager_cache()
+    logger.info("UserDataManager cache cleared (SQLite connections closed)")
 
     # Clean up database connections
     from clients.postgres_client import PostgresClient
@@ -466,6 +496,7 @@ def create_app() -> FastAPI:
     app.include_router(data.router, prefix="/v0/api", tags=["data"])
     app.include_router(actions.router, prefix="/v0/api", tags=["actions"])
     app.include_router(tool_config.router, prefix="/v0/api", tags=["tool_config"])
+    app.include_router(federation_api.router, prefix="/v0/api", tags=["federation"])
 
     
     return app

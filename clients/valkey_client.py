@@ -228,10 +228,56 @@ class ValkeyClient:
 
         return count
 
+    def json_set(self, key: str, path: str, value: Any, ex: int = None) -> bool:
+        """Set JSON data, optionally with expiration.
+
+        When path is "$", replaces entire value. When path is "$.field_name",
+        updates just that field in existing JSON (read-modify-write).
+
+        Args:
+            key: The key to store JSON data
+            path: "$" for full replacement, "$.field_name" for field update
+            value: Value to set
+            ex: Expiration in seconds. If None, preserves existing TTL (for updates)
+                or uses no expiration (for new keys)
+
+        Returns:
+            True if successful, False if key doesn't exist (for field updates)
+        """
+        if path == "$":
+            # Full replacement
+            json_data = json.dumps(value)
+            if ex is not None:
+                return self._client.setex(key, ex, json_data)
+            else:
+                return self._client.set(key, json_data)
+
+        # Field update: read-modify-write
+        if not path.startswith("$."):
+            raise ValueError(f"Unsupported path: {path}. Use '$' or '$.field_name'")
+
+        current = self.json_get(key, "$")
+        if current is None:
+            return False
+
+        data = current[0]
+        field = path[2:]
+        data[field] = value
+
+        # Preserve existing TTL if no expiry specified
+        if ex is None:
+            remaining_ttl = self.ttl(key)
+            ex = remaining_ttl if remaining_ttl > 0 else None
+
+        json_data = json.dumps(data)
+        if ex is not None:
+            return self._client.setex(key, ex, json_data)
+        else:
+            return self._client.set(key, json_data)
+
     def json_set_with_expiry(self, key: str, path: str, value: Any, ex: int) -> bool:
-        """Set JSON data with expiration (used by auth service for token storage)."""
-        json_data = json.dumps(value)
-        return self._client.setex(key, ex, json_data)
+        """Set JSON data with expiration. Alias for json_set with required ex."""
+        return self.json_set(key, path, value, ex=ex)
 
     def json_get(self, key: str, path: str) -> Optional[List[Any]]:
         """Get JSON data (returns list format for JSONPath compatibility)."""

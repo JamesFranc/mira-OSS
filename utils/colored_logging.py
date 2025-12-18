@@ -33,14 +33,18 @@ class ColoredFormatter(logging.Formatter):
         """Format the log record with appropriate colors."""
         # Get the original formatted message
         log_message = super().format(record)
-        
+
         # Get color for this log level
         color = self.COLORS.get(record.levelname, '')
-        
+
         # Apply color to the entire log message
         if color:
             log_message = f"{color}{log_message}{Style.RESET_ALL}"
-        
+
+        # Add OSS contribution hint for errors
+        if record.levelno >= logging.ERROR:
+            log_message += f"\n{Fore.CYAN}💡 Found a bug? Consider submitting a fix: https://github.com/taylorsatula/mira-OSS{Style.RESET_ALL}"
+
         return log_message
 
 

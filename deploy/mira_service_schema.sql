@@ -92,6 +92,23 @@ GRANT ALL ON SCHEMA public TO mira_admin;
 -- USERS & AUTH TABLES
 -- =====================================================================
 
+-- Account tiers table (defines available tiers and their LLM configs)
+-- Must be created before users table due to FK reference
+CREATE TABLE IF NOT EXISTS account_tiers (
+    name VARCHAR(20) PRIMARY KEY,
+    model VARCHAR(100) NOT NULL,
+    thinking_budget INT NOT NULL DEFAULT 0,
+    description TEXT,
+    display_order INT NOT NULL DEFAULT 0
+);
+
+-- Seed initial tiers
+INSERT INTO account_tiers (name, model, thinking_budget, description, display_order) VALUES
+    ('fast', 'claude-haiku-4-5-20251001', 1024, 'Haiku with quick thinking', 1),
+    ('balanced', 'claude-sonnet-4-5-20250929', 1024, 'Sonnet with light reasoning', 2),
+    ('nuanced', 'claude-opus-4-5-20251101', 8192, 'Opus with nuanced reasoning', 3)
+ON CONFLICT (name) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email VARCHAR(255) UNIQUE NOT NULL,
@@ -108,8 +125,14 @@ CREATE TABLE IF NOT EXISTS users (
 
     -- Activity-based time tracking (vacation-proof scoring)
     cumulative_activity_days INT DEFAULT 0,
-    last_activity_date DATE
+    last_activity_date DATE,
+
+    -- LLM tier preference (fast=Haiku, balanced=Sonnet, nuanced=Opus)
+    llm_tier VARCHAR(20) NOT NULL DEFAULT 'balanced' REFERENCES account_tiers(name)
 );
+
+-- Grant SELECT on account_tiers to application user
+GRANT SELECT ON account_tiers TO mira_dbuser;
 
 COMMENT ON COLUMN users.cumulative_activity_days IS 'Total number of days user has sent at least one message (activity-based time metric)';
 COMMENT ON COLUMN users.last_activity_date IS 'Last date user sent a message (prevents double-counting same day)';
@@ -146,6 +169,28 @@ CREATE TABLE IF NOT EXISTS magic_links (
 );
 
 COMMENT ON TABLE magic_links IS 'Passwordless authentication tokens for magic link login flow';
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash VARCHAR(64) NOT NULL UNIQUE,  -- SHA256 hex = 64 chars
+    name VARCHAR(100) NOT NULL DEFAULT 'API Token',
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMP WITH TIME ZONE,  -- NULL = never expires
+    last_used_at TIMESTAMP WITH TIME ZONE,
+    revoked_at TIMESTAMP WITH TIME ZONE  -- soft delete for audit trail
+);
+
+-- Index for fast token validation (most common operation)
+CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash) WHERE revoked_at IS NULL;
+
+-- Index for listing user's tokens
+CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id) WHERE revoked_at IS NULL;
+
+-- Unique constraint on token name per user (only for non-revoked tokens)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_tokens_user_name_unique ON api_tokens(user_id, name) WHERE revoked_at IS NULL;
+
+COMMENT ON TABLE api_tokens IS 'Persistent API tokens for programmatic access (hashed, shown once at creation)';
 
 -- =====================================================================
 -- ACTIVITY TRACKING (for vacation-proof scoring)
@@ -246,6 +291,13 @@ CREATE INDEX IF NOT EXISTS idx_messages_continuum_id ON messages(continuum_id);
 -- Created timestamp index for temporal queries
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
 
+-- HNSW vector index for segment embedding similarity search
+-- Partial index: only segment boundaries with embeddings
+CREATE INDEX IF NOT EXISTS idx_messages_segment_embedding ON messages
+    USING hnsw (segment_embedding vector_cosine_ops)
+    WHERE metadata->>'is_segment_boundary' = 'true'
+      AND segment_embedding IS NOT NULL;
+
 COMMENT ON TABLE messages IS 'All conversation messages; segments implemented as sentinel messages with is_segment_boundary=true in metadata';
 COMMENT ON COLUMN messages.segment_embedding IS 'mdbr-leaf-ir-asym 768d embedding for segment sentinels. See docs/SystemsOverview/segment_system_overview.md for architecture details.';
 
@@ -264,6 +316,7 @@ CREATE TABLE IF NOT EXISTS memories (
     updated_at TIMESTAMP WITH TIME ZONE,
     expires_at TIMESTAMP WITH TIME ZONE,
     access_count INTEGER NOT NULL DEFAULT 0,
+    mention_count INTEGER NOT NULL DEFAULT 0,  -- Explicit LLM references (strongest importance signal)
     last_accessed TIMESTAMP WITH TIME ZONE,
     happens_at TIMESTAMP WITH TIME ZONE,
 
@@ -535,6 +588,11 @@ ALTER TABLE entities ENABLE ROW LEVEL SECURITY;
 CREATE POLICY entities_user_policy ON entities
     FOR ALL TO PUBLIC
     USING (user_id = current_setting('app.current_user_id')::uuid);
+
+ALTER TABLE api_tokens ENABLE ROW LEVEL SECURITY;
+CREATE POLICY api_tokens_user_policy ON api_tokens
+    FOR ALL TO PUBLIC
+    USING (user_id = current_setting('app.current_user_id', true)::uuid);
 
 -- Note: extraction_batches and post_processing_batches do NOT have RLS
 -- These are system tracking tables accessed by admin polling jobs

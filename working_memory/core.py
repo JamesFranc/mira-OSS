@@ -4,10 +4,15 @@ Event-driven working memory core.
 Coordinates trinkets and system prompt composition through CNS events.
 All operations are synchronous - events are published and handled immediately.
 """
+import json
 import logging
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, Any, Optional, TYPE_CHECKING
 
+from clients.valkey_client import get_valkey_client
+from utils.user_context import get_current_user_id, get_current_user
+from utils.timezone_utils import utc_now, format_utc_iso
 from .composer import SystemPromptComposer, ComposerConfig
+from .trinkets.base import TRINKET_KEY_PREFIX
 
 if TYPE_CHECKING:
     from cns.integration.event_bus import EventBus
@@ -79,9 +84,18 @@ class WorkingMemory:
         # Store context for future trinket updates
         self._current_continuum_id = event.continuum_id
         self._current_user_id = event.user_id
-        
+
+        # Get user's first name for system prompt personalization
+        user_data = get_current_user() or {}
+        first_name = (user_data.get('first_name') or '').strip()
+        user_name = first_name if first_name else "The User"
+        logger.debug(f"Using name '{user_name}' for system prompt")
+
+        # Replace "The User" with actual user name (or keep default if no name set)
+        personalized_prompt = event.base_prompt.replace("The User", user_name)
+
         # Set base prompt
-        self.composer.set_base_prompt(event.base_prompt)
+        self.composer.set_base_prompt(personalized_prompt)
         
         # Clear previous sections except base
         self.composer.clear_sections(preserve_base=True)
@@ -204,6 +218,67 @@ class WorkingMemory:
             Trinket instance or None if not found
         """
         return self._trinkets.get(name)
+
+    def get_trinket_state(self, section_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Get cached state of a single trinket from Valkey.
+
+        Args:
+            section_name: The trinket's section name (e.g., 'user_information')
+
+        Returns:
+            Dict with section_name, content, cache_policy, last_updated
+            or None if not found
+        """
+        user_id = get_current_user_id()
+        hash_key = f"{TRINKET_KEY_PREFIX}:{user_id}"
+
+        valkey = get_valkey_client()
+        json_value = valkey.hget_with_retry(hash_key, section_name)
+
+        if json_value is None:
+            return None
+
+        try:
+            data = json.loads(json_value)
+            return {
+                "section_name": section_name,
+                "content": data.get("content", ""),
+                "cache_policy": data.get("cache_policy", False),
+                "last_updated": data.get("updated_at")
+            }
+        except json.JSONDecodeError:
+            logger.warning(f"Invalid JSON in trinket cache for section: {section_name}")
+            return None
+
+    def get_all_trinket_states(self) -> Dict[str, Any]:
+        """
+        Get cached state of all trinkets from Valkey.
+
+        Queries each section individually and compiles results.
+
+        Returns:
+            Dict with trinkets list and metadata
+        """
+        user_id = get_current_user_id()
+        hash_key = f"{TRINKET_KEY_PREFIX}:{user_id}"
+
+        valkey = get_valkey_client()
+        section_names = valkey._client.hkeys(hash_key)
+
+        trinkets = []
+        for section_name in section_names:
+            state = self.get_trinket_state(section_name)
+            if state:
+                trinkets.append(state)
+
+        return {
+            "trinkets": trinkets,
+            "meta": {
+                "trinket_count": len(trinkets),
+                "loaded_at": format_utc_iso(utc_now())
+            }
+        }
 
     ## @CLAUDE I see no mentions of this being invoked in the codebase. Dead code?
     

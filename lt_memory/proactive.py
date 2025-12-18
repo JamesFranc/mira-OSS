@@ -243,7 +243,9 @@ class ProactiveService:
             "id": str(memory.id),
             "text": memory.text,
             "importance_score": memory.importance_score,
-            "similarity_score": memory.similarity_score,
+            "similarity_score": memory.similarity_score,  # Sigmoid-normalized RRF score (0-1)
+            "vector_similarity": getattr(memory, '_vector_similarity', None),  # Raw cosine similarity
+            "_raw_rrf_score": getattr(memory, '_raw_rrf_score', None),  # Raw RRF before sigmoid
             "created_at": memory.created_at.isoformat() if memory.created_at else None,
             "last_accessed": memory.last_accessed.isoformat() if memory.last_accessed else None,
             "access_count": memory.access_count,

@@ -10,8 +10,8 @@ from pydantic import BaseModel, Field
 
 from tools.registry import registry
 from tools.repo import Tool
-from utils.timezone_utils import convert_to_utc, ensure_utc, parse_time_string, utc_now
-from utils.user_context import get_current_user_id, get_user_timezone
+from utils.timezone_utils import convert_to_utc, ensure_utc, parse_time_string, utc_now, parse_utc_time_string
+from utils.user_context import get_current_user_id, get_user_preferences
 from utils.userdata_manager import get_user_data_manager
 
 logger = logging.getLogger(__name__)
@@ -273,7 +273,7 @@ class PunchclockTool(Tool):
             return utc_now() + delta
 
         try:
-            tz_name = get_user_timezone()
+            tz_name = get_user_preferences().timezone
         except RuntimeError:
             tz_name = "UTC"
 
@@ -311,8 +311,7 @@ class PunchclockTool(Tool):
     def _iso_to_dt(value: Optional[str]) -> Optional[datetime]:
         if not value:
             return None
-        dt = datetime.fromisoformat(value)
-        return ensure_utc(dt)
+        return parse_utc_time_string(value)
 
     @staticmethod
     def _format_duration(total_seconds: float) -> str:

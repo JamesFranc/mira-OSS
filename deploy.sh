@@ -685,77 +685,98 @@ else
 
     # Anthropic API Key (required for online mode)
     echo -e "${BOLD}${BLUE}1. Anthropic API Key${RESET} ${DIM}(REQUIRED - console.anthropic.com/settings/keys)${RESET}"
-    read -p "$(echo -e ${CYAN}Enter key${RESET}) (or Enter to skip): " ANTHROPIC_KEY_INPUT
-    if [ -z "$ANTHROPIC_KEY_INPUT" ]; then
-        CONFIG_ANTHROPIC_KEY="PLACEHOLDER_SET_THIS_LATER"
-        STATUS_ANTHROPIC="${WARNING} NOT SET - You must configure this before using MIRA"
-    else
+    while true; do
+        read -p "$(echo -e ${CYAN}Enter key${RESET}) (or Enter to skip): " ANTHROPIC_KEY_INPUT
+        if [ -z "$ANTHROPIC_KEY_INPUT" ]; then
+            CONFIG_ANTHROPIC_KEY="PLACEHOLDER_SET_THIS_LATER"
+            STATUS_ANTHROPIC="${WARNING} NOT SET - You must configure this before using MIRA"
+            break
+        fi
         # Basic validation - check if it looks like an Anthropic key
         if [[ $ANTHROPIC_KEY_INPUT =~ ^sk-ant- ]]; then
             CONFIG_ANTHROPIC_KEY="$ANTHROPIC_KEY_INPUT"
             STATUS_ANTHROPIC="${CHECKMARK} Configured"
+            break
         else
             print_warning "This doesn't look like a valid Anthropic API key (should start with 'sk-ant-')"
-            read -p "$(echo -e ${YELLOW}Continue anyway?${RESET}) (y/n): " CONFIRM
-            if [[ ! "$CONFIRM" =~ ^[Yy](es)?$ ]]; then
-                CONFIG_ANTHROPIC_KEY="PLACEHOLDER_SET_THIS_LATER"
-                STATUS_ANTHROPIC="${WARNING} NOT SET"
-            else
+            read -p "$(echo -e ${YELLOW}Continue anyway?${RESET}) (y=yes, n=exit, t=try again): " CONFIRM
+            if [[ "$CONFIRM" =~ ^[Yy](es)?$ ]]; then
                 CONFIG_ANTHROPIC_KEY="$ANTHROPIC_KEY_INPUT"
                 STATUS_ANTHROPIC="${CHECKMARK} Configured (unvalidated)"
+                break
+            elif [[ "$CONFIRM" =~ ^[Tt](ry)?$ ]]; then
+                continue
+            else
+                CONFIG_ANTHROPIC_KEY="PLACEHOLDER_SET_THIS_LATER"
+                STATUS_ANTHROPIC="${WARNING} NOT SET"
+                break
             fi
         fi
-    fi
+    done
 
     # Anthropic Batch API Key (optional - for background memory processing)
     echo -e "${BOLD}${BLUE}1b. Anthropic Batch API Key${RESET} ${DIM}(OPTIONAL - separate key for batch operations)${RESET}"
     echo -e "${DIM}    Leave blank to use the same key as above. Separate keys allow independent rate limits and cost tracking.${RESET}"
-    read -p "$(echo -e ${CYAN}Enter batch key${RESET}) (or Enter to use main key): " ANTHROPIC_BATCH_KEY_INPUT
-    if [ -z "$ANTHROPIC_BATCH_KEY_INPUT" ]; then
-        # Use same key as main Anthropic key
-        CONFIG_ANTHROPIC_BATCH_KEY="$CONFIG_ANTHROPIC_KEY"
-        STATUS_ANTHROPIC_BATCH="${DIM}Using main Anthropic key${RESET}"
-    else
+    while true; do
+        read -p "$(echo -e ${CYAN}Enter batch key${RESET}) (or Enter to use main key): " ANTHROPIC_BATCH_KEY_INPUT
+        if [ -z "$ANTHROPIC_BATCH_KEY_INPUT" ]; then
+            # Use same key as main Anthropic key
+            CONFIG_ANTHROPIC_BATCH_KEY="$CONFIG_ANTHROPIC_KEY"
+            STATUS_ANTHROPIC_BATCH="${DIM}Using main Anthropic key${RESET}"
+            break
+        fi
         # Basic validation - check if it looks like an Anthropic key
         if [[ $ANTHROPIC_BATCH_KEY_INPUT =~ ^sk-ant- ]]; then
             CONFIG_ANTHROPIC_BATCH_KEY="$ANTHROPIC_BATCH_KEY_INPUT"
             STATUS_ANTHROPIC_BATCH="${CHECKMARK} Configured (separate key)"
+            break
         else
             print_warning "This doesn't look like a valid Anthropic API key (should start with 'sk-ant-')"
-            read -p "$(echo -e ${YELLOW}Continue anyway?${RESET}) (y/n): " CONFIRM
-            if [[ ! "$CONFIRM" =~ ^[Yy](es)?$ ]]; then
-                CONFIG_ANTHROPIC_BATCH_KEY="$CONFIG_ANTHROPIC_KEY"
-                STATUS_ANTHROPIC_BATCH="${DIM}Using main Anthropic key${RESET}"
-            else
+            read -p "$(echo -e ${YELLOW}Continue anyway?${RESET}) (y=yes, n=use main key, t=try again): " CONFIRM
+            if [[ "$CONFIRM" =~ ^[Yy](es)?$ ]]; then
                 CONFIG_ANTHROPIC_BATCH_KEY="$ANTHROPIC_BATCH_KEY_INPUT"
                 STATUS_ANTHROPIC_BATCH="${CHECKMARK} Configured (unvalidated)"
+                break
+            elif [[ "$CONFIRM" =~ ^[Tt](ry)?$ ]]; then
+                continue
+            else
+                CONFIG_ANTHROPIC_BATCH_KEY="$CONFIG_ANTHROPIC_KEY"
+                STATUS_ANTHROPIC_BATCH="${DIM}Using main Anthropic key${RESET}"
+                break
             fi
         fi
-    fi
+    done
 
     # Groq API Key (required for online mode)
     echo -e "${BOLD}${BLUE}2. Groq API Key${RESET} ${DIM}(REQUIRED - console.groq.com/keys)${RESET}"
-    read -p "$(echo -e ${CYAN}Enter key${RESET}) (or Enter to skip): " GROQ_KEY_INPUT
-    if [ -z "$GROQ_KEY_INPUT" ]; then
-        CONFIG_GROQ_KEY="PLACEHOLDER_SET_THIS_LATER"
-        STATUS_GROQ="${WARNING} NOT SET - You must configure this before using MIRA"
-    else
+    while true; do
+        read -p "$(echo -e ${CYAN}Enter key${RESET}) (or Enter to skip): " GROQ_KEY_INPUT
+        if [ -z "$GROQ_KEY_INPUT" ]; then
+            CONFIG_GROQ_KEY="PLACEHOLDER_SET_THIS_LATER"
+            STATUS_GROQ="${WARNING} NOT SET - You must configure this before using MIRA"
+            break
+        fi
         # Basic validation - check if it looks like a Groq key
         if [[ $GROQ_KEY_INPUT =~ ^gsk_ ]]; then
             CONFIG_GROQ_KEY="$GROQ_KEY_INPUT"
             STATUS_GROQ="${CHECKMARK} Configured"
+            break
         else
             print_warning "This doesn't look like a valid Groq API key (should start with 'gsk_')"
-            read -p "$(echo -e ${YELLOW}Continue anyway?${RESET}) (y/n): " CONFIRM
-            if [[ ! "$CONFIRM" =~ ^[Yy](es)?$ ]]; then
-                CONFIG_GROQ_KEY="PLACEHOLDER_SET_THIS_LATER"
-                STATUS_GROQ="${WARNING} NOT SET"
-            else
+            read -p "$(echo -e ${YELLOW}Continue anyway?${RESET}) (y=yes, n=exit, t=try again): " CONFIRM
+            if [[ "$CONFIRM" =~ ^[Yy](es)?$ ]]; then
                 CONFIG_GROQ_KEY="$GROQ_KEY_INPUT"
                 STATUS_GROQ="${CHECKMARK} Configured (unvalidated)"
+                break
+            elif [[ "$CONFIRM" =~ ^[Tt](ry)?$ ]]; then
+                continue
+            else
+                CONFIG_GROQ_KEY="PLACEHOLDER_SET_THIS_LATER"
+                STATUS_GROQ="${WARNING} NOT SET"
+                break
             fi
         fi
-    fi
+    done
 
     # Kagi API Key (optional - for web search)
     echo -e "${BOLD}${BLUE}3. Kagi Search API Key${RESET} ${DIM}(OPTIONAL - kagi.com/settings?p=api)${RESET}"
@@ -1241,82 +1262,64 @@ fi
 
 print_success "Python dependencies installed"
 
-print_header "Step 6: AI Model Downloads"
+print_header "Step 6: Embedding Model Download"
 
-# Check what's already cached by verifying required files exist
+# Download MongoDB leaf embedding model (768d asymmetric retrieval)
 echo -ne "${DIM}${ARROW}${RESET} Checking embedding model cache... "
-MODELS_CACHED=$(venv/bin/python3 << 'EOF'
+MODEL_CACHED=$(venv/bin/python3 << 'EOF'
 from pathlib import Path
-import os
 
 cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
 
-def check_model_cached(model_substrings):
+def check_model_cached(model_substring):
     """Check if a model is fully cached by looking for model directories and required files"""
     if not cache_dir.exists():
         return False
 
-    # Find directories matching any of the substrings
-    model_dirs = [d for d in cache_dir.iterdir() if d.is_dir() and any(s in d.name for s in model_substrings)]
+    model_dirs = [d for d in cache_dir.iterdir() if d.is_dir() and model_substring in d.name]
 
     for model_dir in model_dirs:
-        # Check for essential files that indicate a complete download
-        # Look in snapshots subdirectory where actual model files are stored
         snapshots_dir = model_dir / "snapshots"
         if snapshots_dir.exists():
             for snapshot in snapshots_dir.iterdir():
                 if snapshot.is_dir():
-                    # Check for config and model files
                     has_config = (snapshot / "config.json").exists()
                     has_model = (snapshot / "pytorch_model.bin").exists() or (snapshot / "model.safetensors").exists()
                     if has_config and has_model:
                         return True
     return False
 
-has_minilm = check_model_cached(["all-MiniLM-L6-v2"])
-has_reranker = check_model_cached(["bge-reranker-base"])
-
-if has_minilm and has_reranker:
-    print("all")
-elif has_minilm or has_reranker:
-    print("partial")
+if check_model_cached("mdbr-leaf-ir-asym"):
+    print("cached")
 else:
-    print("none")
+    print("not_cached")
 EOF
 )
 
-if [ "$MODELS_CACHED" = "all" ]; then
-    echo -e "${CHECKMARK} ${DIM}(both models already cached)${RESET}"
-    print_info "To re-download: rm -rf ~/.cache/huggingface/hub"
-elif [ "$MODELS_CACHED" = "partial" ]; then
-    echo -e "${DIM}(some models cached, downloading missing)${RESET}"
+if [ "$MODEL_CACHED" = "cached" ]; then
+    echo -e "${CHECKMARK} ${DIM}(MongoDB/mdbr-leaf-ir-asym already cached)${RESET}"
+    print_info "To re-download: rm -rf ~/.cache/huggingface/hub/*mdbr-leaf*"
 else
     echo -e "${DIM}(not found)${RESET}"
-fi
-
-# Only download if not all cached
-if [ "$MODELS_CACHED" != "all" ]; then
     if [ "$LOUD_MODE" = true ]; then
-        print_step "Downloading embedding and reranker models..."
+        print_step "Downloading MongoDB/mdbr-leaf-ir-asym embedding model..."
         venv/bin/python3 << 'EOF'
 from sentence_transformers import SentenceTransformer
-print("→ Loading/downloading all-MiniLM-L6-v2...")
-SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-print("✓ all-MiniLM-L6-v2 ready")
-print("→ Loading/downloading BAAI/bge-reranker-base...")
-SentenceTransformer("BAAI/bge-reranker-base")
-print("✓ BGE reranker ready")
+print("→ Loading/downloading MongoDB/mdbr-leaf-ir-asym (768d)...")
+SentenceTransformer("MongoDB/mdbr-leaf-ir-asym")
+print("✓ mdbr-leaf-ir-asym ready")
 EOF
     else
         (venv/bin/python3 << 'EOF'
 from sentence_transformers import SentenceTransformer
-SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-SentenceTransformer("BAAI/bge-reranker-base")
+SentenceTransformer("MongoDB/mdbr-leaf-ir-asym")
 EOF
 ) &
-        show_progress $! "Downloading embedding models"
+        show_progress $! "Downloading MongoDB/mdbr-leaf-ir-asym embedding model"
     fi
 fi
+
+print_success "Embedding model ready"
 
 print_header "Step 7: Playwright Browser Setup"
 
@@ -1678,9 +1681,6 @@ vault_put_if_not_exists secret/mira/services \
 print_success "All credentials configured in Vault"
 
 print_header "Step 15: MIRA CLI Setup"
-
-# Install CLI-specific dependencies (not in main requirements.txt)
-install_python_package prompt-toolkit
 
 echo -ne "${DIM}${ARROW}${RESET} Creating mira wrapper script... "
 

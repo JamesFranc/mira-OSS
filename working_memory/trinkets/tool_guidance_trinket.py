@@ -40,16 +40,18 @@ class ToolGuidanceTrinket(EventAwareTrinket):
             logger.debug("No tool hints available")
             return ""
         
-        # Generate tool guidance section
-        parts = ["=== TOOL USAGE TIPS ==="]
+        # Generate tool guidance section with XML structure
+        parts = ["<tool_guidance>"]
 
         # Add each tool's hints
         for tool_name, hint in sorted(valid_hints.items()):
-            # Format tool name nicely (remove _tool suffix)
-            display_name = tool_name.replace('_tool', '').replace('_', ' ').title().upper()
-            parts.append(f"\n= {display_name} =")
+            # Use raw tool name for attribute (without _tool suffix for readability)
+            attr_name = tool_name.replace('_tool', '')
+            parts.append(f"<tool name=\"{attr_name}\">")
             parts.append(hint.strip())
-        
+            parts.append("</tool>")
+
+        parts.append("</tool_guidance>")
         result = "\n".join(parts)
         
         logger.debug(f"Generated tool guidance for {len(valid_hints)} tools with hints")

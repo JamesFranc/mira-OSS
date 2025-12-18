@@ -38,13 +38,14 @@ class ContinuumOrchestrator:
         tag_parser,
         fingerprint_generator,
         event_bus,
-        memory_relevance_service
+        memory_relevance_service,
+        memory_evacuator=None
     ):
         """
         Initialize orchestrator with dependencies.
 
-        All parameters are REQUIRED. The orchestrator will fail immediately if any
-        required dependency is missing or used incorrectly.
+        All parameters are REQUIRED except memory_evacuator. The orchestrator will
+        fail immediately if any required dependency is missing or used incorrectly.
 
         Args:
             llm_provider: LLM provider for generating responses (required)
@@ -57,6 +58,8 @@ class ContinuumOrchestrator:
             event_bus: Event bus for publishing/subscribing to events (required)
             memory_relevance_service: Memory relevance service for surfacing long-term memories (required).
                                      Raises exceptions on infrastructure failures - no degraded state.
+            memory_evacuator: Memory evacuator for curating pinned memories under pressure (optional).
+                             When provided, triggers evacuation when anchor count exceeds threshold.
         """
         self.llm_provider = llm_provider
         self.continuum_repo = continuum_repo
@@ -65,6 +68,7 @@ class ContinuumOrchestrator:
         self.tag_parser = tag_parser
         self.fingerprint_generator = fingerprint_generator
         self.memory_relevance_service = memory_relevance_service
+        self.memory_evacuator = memory_evacuator
         self.event_bus = event_bus
 
         # Get singleton embeddings provider for generating embeddings once
@@ -87,19 +91,27 @@ class ContinuumOrchestrator:
         stream: bool = False,
         stream_callback=None,
         _tried_loading_all_tools: bool = False,
-        unit_of_work=None
+        unit_of_work=None,
+        storage_content: Optional[Union[str, List[Dict[str, Any]]]] = None,
+        segment_turn_number: int = 1,
     ) -> tuple[Continuum, str, Dict[str, Any]]:
         """
         Process user message through complete continuum flow.
 
         Args:
             continuum: Current continuum state
-            user_message: User's input message (string or multimodal content array)
+            user_message: User's input message (string or multimodal content array).
+                         For images, this should be the inference tier (1200px).
             system_prompt: Base system prompt
             stream: Whether to stream response
             stream_callback: Callback for streaming chunks
             _tried_loading_all_tools: Internal flag to prevent infinite need_tool loops
             unit_of_work: Optional UnitOfWork for batching persistence operations
+            storage_content: Content for persistence (optional). For images, this should
+                           be the storage tier (512px WebP). If not provided, user_message
+                           is used for persistence.
+            segment_turn_number: Turn number within current segment (1-indexed).
+                               Incremented at API entry point for real user messages.
 
         Returns:
             Tuple of (updated_continuum, final_response, metadata)
@@ -125,20 +137,48 @@ class ContinuumOrchestrator:
         # Get previous memories from trinket for retention evaluation
         previous_memories = self._get_previous_memories()
 
+        # Evacuation checkpoint: curate pinned memories under pressure
+        if self.memory_evacuator:
+            anchor_count = len(previous_memories)
+            if self.memory_evacuator.should_evacuate(previous_memories):
+                logger.debug(
+                    f"Memory evacuation triggered: {anchor_count} anchors > "
+                    f"threshold {self.memory_evacuator.config.evacuation_trigger_threshold}"
+                )
+                previous_memories = self.memory_evacuator.evacuate(
+                    memories=previous_memories,
+                    continuum=continuum,
+                    user_message=text_for_context
+                )
+                logger.debug(
+                    f"Evacuation complete: {len(previous_memories)}/{anchor_count} anchors retained "
+                    f"(target: {self.memory_evacuator.config.evacuation_target_count})"
+                )
+
+                # Update trinket cache with evacuated list
+                trinket = self.working_memory.get_trinket('ProactiveMemoryTrinket')
+                if trinket:
+                    trinket._cached_memories = previous_memories
+            else:
+                logger.debug(
+                    f"Evacuation check: {anchor_count} anchors <= "
+                    f"threshold {self.memory_evacuator.config.evacuation_trigger_threshold}, no action"
+                )
+
         # Generate fingerprint and evaluate retention of previous memories
         # The fingerprint expands fragmentary queries into retrieval-optimized specifics.
         # Retention evaluation uses LLM reasoning to decide which previous memories
         # should stay in context based on conversation trajectory.
         #
         # generate_fingerprint() raises RuntimeError on failure - no degraded state
-        fingerprint, retained_texts = self.fingerprint_generator.generate_fingerprint(
+        fingerprint, pinned_ids = self.fingerprint_generator.generate_fingerprint(
             continuum,
             text_for_context,
             previous_memories=previous_memories
         )
 
-        # Apply retention to get pinned memories
-        pinned_memories = self._apply_retention(previous_memories, retained_texts)
+        # Apply retention to get pinned memories (filters by 8-char ID match)
+        pinned_memories = self._apply_retention(previous_memories, pinned_ids)
 
         # Generate 768d embedding for the fingerprint (query encoding)
         fingerprint_embedding = self.embeddings_provider.encode_realtime(fingerprint)
@@ -231,22 +271,39 @@ class ContinuumOrchestrator:
         raw_response = None
         invoked_tool_loader = False  # Track if invokeother_tool was called during this turn
 
-        # Apply thinking budget preference if set
-        llm_kwargs = {}
-        thinking_pref = continuum.thinking_budget_preference
-        if thinking_pref is not None:
-            if thinking_pref == 0:
-                # Explicit disable
-                llm_kwargs['thinking_enabled'] = False
-            else:
-                # Explicit enable with budget
-                llm_kwargs['thinking_enabled'] = True
-                llm_kwargs['thinking_budget'] = thinking_pref
+        # Apply tier-based model and thinking configuration
+        from utils.user_context import get_user_preferences, resolve_tier
 
-        # Apply model preference if set
-        model_pref = continuum.model_preference
-        if model_pref is not None:
-            llm_kwargs['model_preference'] = model_pref
+        llm_kwargs = {}
+        prefs = get_user_preferences()
+        tier_config = resolve_tier(prefs.llm_tier)
+
+        llm_kwargs['model_preference'] = tier_config.model
+        if tier_config.thinking_budget == 0:
+            llm_kwargs['thinking_enabled'] = False
+        else:
+            llm_kwargs['thinking_enabled'] = True
+            llm_kwargs['thinking_budget'] = tier_config.thinking_budget
+
+        # Retrieve container_id from Valkey for multi-turn file persistence
+        # Only pass container_id if code_execution tool is enabled (Anthropic requirement)
+        from clients.valkey_client import get_valkey
+        valkey = get_valkey()
+
+        # Check if code_execution is in the tools list
+        has_code_execution = any(
+            tool.get("type") == "code_execution_20250825"
+            for tool in available_tools
+        )
+
+        if has_code_execution:
+            valkey_key = f"container:{continuum.id}"
+            container_id = valkey.get(valkey_key)
+            if container_id:
+                llm_kwargs['container_id'] = container_id
+                logger.info(f"📦 Reusing container from Valkey: {container_id}")
+            else:
+                logger.info("📦 No existing container - new container will be created")
 
         # Collect events from generator
         for event in self.llm_provider.stream_events(
@@ -254,16 +311,53 @@ class ContinuumOrchestrator:
             tools=available_tools,
             **llm_kwargs
         ):
-            from cns.core.stream_events import TextEvent, ThinkingEvent, CompleteEvent, ToolExecutingEvent
+            from cns.core.stream_events import (
+                TextEvent, ThinkingEvent, CompleteEvent,
+                ToolExecutingEvent, ToolCompletedEvent, ToolErrorEvent
+            )
 
             # Detect invokeother_tool execution for auto-continuation
             # Must check here because final response won't contain intermediate tool calls
             if isinstance(event, ToolExecutingEvent):
-                if event.tool_name == "invokeother_tool":
+                # Log ALL tool executions for visibility
+                if event.tool_name == "code_execution":
+                    logger.info("=" * 80)
+                    logger.info("🐍 CODE_EXECUTION INVOKED")
+                    logger.info("=" * 80)
+                    # Log the Python code being executed
+                    code = event.arguments.get("code", "")
+                    logger.info(f"Python code to execute:\n{code}")
+                    logger.info("=" * 80)
+                elif event.tool_name == "invokeother_tool":
                     mode = event.arguments.get("mode", "")
-                    if mode in ["load", "fallback"]:
+                    if mode in ["load", "fallback", "prepare_code_execution"]:
                         invoked_tool_loader = True
                         logger.info(f"Detected invokeother_tool execution with mode={mode}")
+                else:
+                    # Log other tool calls for context
+                    logger.info(f"Tool executing: {event.tool_name} with args: {event.arguments}")
+
+            # Log tool completion results
+            if isinstance(event, ToolCompletedEvent):
+                if event.tool_name == "code_execution":
+                    logger.info("=" * 80)
+                    logger.info("✅ CODE_EXECUTION COMPLETED")
+                    logger.info("=" * 80)
+                    logger.info(f"Result:\n{event.result}")
+                    logger.info("=" * 80)
+                else:
+                    logger.info(f"Tool completed: {event.tool_name} -> {event.result[:200]}...")
+
+            # Log tool errors
+            if isinstance(event, ToolErrorEvent):
+                if event.tool_name == "code_execution":
+                    logger.error("=" * 80)
+                    logger.error("❌ CODE_EXECUTION FAILED")
+                    logger.error("=" * 80)
+                    logger.error(f"Error:\n{event.error}")
+                    logger.error("=" * 80)
+                else:
+                    logger.error(f"Tool error: {event.tool_name} -> {event.error}")
 
             # Call stream callback if provided (for compatibility during transition)
             if stream and stream_callback:
@@ -283,6 +377,12 @@ class ContinuumOrchestrator:
                 raw_response = event.response
                 response_text = self.llm_provider.extract_text_content(raw_response)
 
+                # Store container_id in Valkey for reuse (1-hour TTL)
+                if hasattr(raw_response, '_container_id') and raw_response._container_id:
+                    valkey_key = f"container:{continuum.id}"
+                    valkey.setex(valkey_key, 3600, raw_response._container_id)  # 1-hour TTL
+                    logger.info(f"📦 Stored container ID in Valkey: {raw_response._container_id}")
+
                 # Log cache metrics for observability
                 if hasattr(raw_response, 'usage') and raw_response.usage:
                     usage = raw_response.usage
@@ -294,7 +394,6 @@ class ContinuumOrchestrator:
                         logger.debug(f"Cache read: {cache_read} tokens")
         
         # Extract tools used from LLM response for metadata
-        # Note: invoked_tool_loader is already set from ToolExecutingEvent above
         tool_calls = self.llm_provider.extract_tool_calls(raw_response)
         if tool_calls:
             tools_used_this_turn = [call["tool_name"] for call in tool_calls]
@@ -316,7 +415,8 @@ class ContinuumOrchestrator:
 
         assistant_metadata = {
             "referenced_memories": parsed_tags.get('referenced_memories', []),
-            "surfaced_memories": [m['id'] for m in surfaced_memories]  # Add surfaced memory IDs
+            "surfaced_memories": [m['id'] for m in surfaced_memories],
+            "pinned_memory_ids": list(pinned_ids)  # 8-char IDs for importance boost
         }
 
         # Add emotion if present
@@ -335,14 +435,16 @@ class ContinuumOrchestrator:
         self._publish_events([TurnCompletedEvent.create(
             continuum_id=str(continuum.id),
             turn_number=turn_number,
+            segment_turn_number=segment_turn_number,  # Turn within current segment
             continuum=continuum
         )])
 
         final_response = clean_response_text
         
-        # Update metadata with referenced memories
+        # Update metadata with referenced memories and pinned IDs
         metadata["referenced_memories"] = parsed_tags.get('referenced_memories', [])
         metadata["surfaced_memories"] = [m['id'] for m in surfaced_memories]
+        metadata["pinned_memory_ids"] = list(pinned_ids)  # 8-char IDs for importance boost
 
         # Add emotion to metadata for persistence
         if parsed_tags.get('emotion'):
@@ -353,13 +455,19 @@ class ContinuumOrchestrator:
             raise ValueError("Unit of Work is required for message persistence")
 
         # Prepare user message for persistence
-        persist_content = user_msg_obj.content
+        # Validate: if user_message contains images, storage_content MUST be provided
         if isinstance(user_msg_obj.content, list):
-            # Extract only text from multimodal content for database storage
-            text_parts = [item['text'] for item in user_msg_obj.content if item.get('type') == 'text']
-            persist_content = ' '.join(text_parts) if text_parts else str(user_msg_obj.content)
+            has_image = any(item.get('type') == 'image' for item in user_msg_obj.content)
+            if has_image and storage_content is None:
+                raise ValueError(
+                    "storage_content is required when user_message contains images. "
+                    "Callers must provide the 512px WebP storage tier for image persistence."
+                )
 
-        # Create a copy with text-only content for persistence if needed
+        # Use storage_content if provided (e.g., 512px WebP for images), otherwise use original
+        persist_content = storage_content if storage_content is not None else user_msg_obj.content
+
+        # Create message with appropriate content for persistence
         from cns.core.message import Message
         persist_user_msg = Message(
             content=persist_content,
@@ -395,7 +503,8 @@ class ContinuumOrchestrator:
                 stream=stream,
                 stream_callback=stream_callback,
                 _tried_loading_all_tools=True,  # Prevent infinite loops
-                unit_of_work=unit_of_work
+                unit_of_work=unit_of_work,
+                segment_turn_number=segment_turn_number
             )
             logger.info("Auto-continuation completed successfully")
 
@@ -427,30 +536,38 @@ class ContinuumOrchestrator:
             return trinket.get_cached_memories()
         return []
 
+    @staticmethod
+    def _shorten_id(memory_id: str) -> str:
+        """Shorten UUID to 8-char hex prefix for matching."""
+        if not memory_id:
+            return ""
+        return memory_id.replace('-', '')[:8].lower()
+
     def _apply_retention(
         self,
         previous_memories: List[Dict[str, Any]],
-        retained_texts: set
+        pinned_ids: set
     ) -> List[Dict[str, Any]]:
         """
         Filter previous memories to keep only those marked for retention.
 
-        Matches by memory text since the LLM outputs full text, not IDs.
+        Matches by 8-char ID prefix since the LLM outputs shortened IDs.
 
         Args:
             previous_memories: All memories from previous turn
-            retained_texts: Set of memory texts marked [x] by the LLM
+            pinned_ids: Set of 8-char memory IDs marked [x] by the LLM
 
         Returns:
             List of memories that should be pinned (retained)
         """
-        if not previous_memories or not retained_texts:
+        if not previous_memories or not pinned_ids:
             return []
 
         pinned = []
         for memory in previous_memories:
-            memory_text = memory.get('text', '')
-            if memory_text and memory_text in retained_texts:
+            memory_id = memory.get('id', '')
+            short_id = ContinuumOrchestrator._shorten_id(memory_id)
+            if short_id and short_id in pinned_ids:
                 pinned.append(memory)
 
         logger.debug(

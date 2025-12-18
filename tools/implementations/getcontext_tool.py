@@ -214,9 +214,14 @@ Return JSON or null if search is complete:
 
         # If parsing fails, return None (search complete)
         next_search = self._safe_parse_json(content, None)
-        if next_search:
+
+        # Validate required fields exist - malformed LLM responses may have partial data
+        if next_search and 'source' in next_search and 'query' in next_search:
             self.search_history.append(next_search)
-        return next_search
+            return next_search
+
+        self.logger.warning(f"Invalid next_search response (missing required fields): {next_search}")
+        return None
 
     def is_search_complete(self, query: str) -> tuple[bool, str]:
         """Check if we have sufficient context based on search mode."""
@@ -599,7 +604,7 @@ class GetContextTool(Tool):
             )
 
     def _search_conversation(self, query: str, entities: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-        """Use continuumsearch_tool to search conversation history.
+        """Use continuum_tool to search conversation history.
 
         Args:
             query: Search query
@@ -609,7 +614,7 @@ class GetContextTool(Tool):
             self.logger.warning("No tool repository available for conversation search")
             return []
 
-        tool = self.tool_repo.get_tool('continuumsearch_tool')
+        tool = self.tool_repo.get_tool('continuum_tool')
         result = tool.run(
             operation='search',
             query=query,
@@ -620,7 +625,7 @@ class GetContextTool(Tool):
         return result.get('results', [])
 
     def _search_memory(self, query: str, entities: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-        """Search long-term memory using continuumsearch_tool.
+        """Search long-term memory using continuum_tool.
 
         Args:
             query: Search query
@@ -630,7 +635,7 @@ class GetContextTool(Tool):
             self.logger.warning("No tool repository available for memory search")
             return []
 
-        tool = self.tool_repo.get_tool('continuumsearch_tool')
+        tool = self.tool_repo.get_tool('continuum_tool')
         result = tool.run(
             operation='search',
             query=query,

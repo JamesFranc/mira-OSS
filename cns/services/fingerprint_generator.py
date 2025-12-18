@@ -109,9 +109,9 @@ class FingerprintGenerator:
             previous_memories: List of memory dicts from previous turn (optional)
 
         Returns:
-            Tuple of (fingerprint, retained_texts):
+            Tuple of (fingerprint, pinned_ids):
             - fingerprint: Expanded query string for embedding and retrieval
-            - retained_texts: Set of memory texts marked for retention ([x])
+            - pinned_ids: Set of 8-char memory IDs marked for retention ([x])
 
         Raises:
             RuntimeError: On generation failure
@@ -122,7 +122,7 @@ class FingerprintGenerator:
                 current_user_message
             )
 
-            # Format previous memories if provided
+            # Format previous memories if provided (now includes 8-char IDs)
             memories_block = self._format_previous_memories(previous_memories)
 
             user_message = self.user_prompt_template.replace(
@@ -154,8 +154,8 @@ class FingerprintGenerator:
             if not response_text:
                 raise RuntimeError("Fingerprint generation returned empty response")
 
-            # Parse fingerprint and retention from response
-            fingerprint, retained_texts = self._parse_response(
+            # Parse fingerprint and pinned IDs from response
+            fingerprint, pinned_ids = self._parse_response(
                 response_text,
                 previous_memories
             )
@@ -163,24 +163,48 @@ class FingerprintGenerator:
             logger.info(f"Generated fingerprint: {fingerprint[:150]}...")
             if previous_memories:
                 logger.info(
-                    f"Retention: {len(retained_texts)}/{len(previous_memories)} memories retained"
+                    f"Retention: {len(pinned_ids)}/{len(previous_memories)} memories pinned"
                 )
 
-            return fingerprint, retained_texts
+            return fingerprint, pinned_ids
 
         except Exception as e:
             logger.error(f"Fingerprint generation failed: {e}", exc_info=True)
             raise RuntimeError(f"Fingerprint generation failed: {str(e)}") from e
+
+    @staticmethod
+    def _shorten_id(memory_id: str) -> str:
+        """Shorten UUID to 8-char hex prefix for compact prompt representation."""
+        if not memory_id:
+            return ""
+        return memory_id.replace('-', '')[:8]
+
+    @staticmethod
+    def _importance_to_dots(importance_score: float) -> str:
+        """
+        Convert importance score (0.0-1.0) to 5-dot visual indicator.
+
+        Scale:
+            ●●●●● = 0.8-1.0 (high importance)
+            ●●●●○ = 0.6-0.8
+            ●●●○○ = 0.4-0.6
+            ●●○○○ = 0.2-0.4
+            ●○○○○ = 0.0-0.2 (low importance)
+        """
+        score = max(0.0, min(1.0, importance_score))
+        filled = int(score * 5) + (1 if score > 0 else 0)  # At least 1 dot if score > 0
+        filled = min(5, max(1, filled)) if score > 0 else 1
+        return "●" * filled + "○" * (5 - filled)
 
     def _format_previous_memories(
         self,
         memories: Optional[List[Dict[str, Any]]]
     ) -> str:
         """
-        Format previous memories for the prompt.
+        Format previous memories for the prompt with 8-char IDs and importance indicators.
 
         Args:
-            memories: List of memory dicts with 'text' field
+            memories: List of memory dicts with 'id', 'text', and 'importance_score' fields
 
         Returns:
             Formatted memory block or empty string if no memories
@@ -191,8 +215,15 @@ class FingerprintGenerator:
         lines = ["\n<previous_memories>"]
         for memory in memories:
             text = memory.get('text', '')
-            if text:
-                lines.append(text)
+            memory_id = memory.get('id', '')
+            importance = memory.get('importance_score', 0.5)
+            short_id = self._shorten_id(memory_id)
+            dots = self._importance_to_dots(importance)
+            if text and short_id:
+                lines.append(f"- {short_id} [{dots}] - {text}")
+            elif text:
+                # Fallback if no ID (shouldn't happen but be defensive)
+                lines.append(f"- [{dots}] - {text}")
         lines.append("</previous_memories>\n")
 
         return "\n".join(lines)
@@ -203,14 +234,16 @@ class FingerprintGenerator:
         previous_memories: Optional[List[Dict[str, Any]]]
     ) -> Tuple[str, Set[str]]:
         """
-        Parse fingerprint and retention decisions from LLM response.
+        Parse fingerprint and pinned memory IDs from LLM response.
 
         Args:
             response_text: Raw LLM response
-            previous_memories: Original memories for fallback matching
+            previous_memories: Original memories for fallback
 
         Returns:
-            Tuple of (fingerprint, retained_texts)
+            Tuple of (fingerprint, pinned_ids):
+            - fingerprint: Expanded query string
+            - pinned_ids: Set of 8-char memory IDs marked [x]
         """
         # Extract fingerprint from <fingerprint> tags
         fingerprint_match = re.search(
@@ -234,11 +267,11 @@ class FingerprintGenerator:
         if not fingerprint:
             raise RuntimeError("Failed to extract fingerprint from response")
 
-        # Extract retained memories from <memory_retention> tags
-        retained_texts: Set[str] = set()
+        # Extract pinned memory IDs from <memory_retention> tags
+        pinned_ids: Set[str] = set()
 
         if not previous_memories:
-            return fingerprint, retained_texts
+            return fingerprint, pinned_ids
 
         retention_match = re.search(
             r'<memory_retention>(.*?)</memory_retention>',
@@ -248,18 +281,24 @@ class FingerprintGenerator:
 
         if retention_match:
             retention_block = retention_match.group(1)
-            # Find all lines starting with [x] (retained)
-            retained_lines = re.findall(r'\[x\]\s*(.+?)(?=\n|$)', retention_block)
-            retained_texts = {line.strip() for line in retained_lines}
-            logger.debug(f"Parsed {len(retained_texts)} retained memories from response")
-        else:
-            # Parse failure fallback: keep all previous memories (conservative)
-            logger.warning(
-                "No <memory_retention> block found in response, keeping all memories"
+            # Extract 8-char IDs from lines starting with [x]
+            # Format: [x] - a1b2c3d4 - memory text
+            id_matches = re.findall(
+                r'\[x\]\s*-\s*([a-f0-9]{8})',
+                retention_block,
+                re.IGNORECASE
             )
-            retained_texts = {m.get('text', '') for m in previous_memories if m.get('text')}
+            pinned_ids = {match.lower() for match in id_matches}
+            logger.debug(f"Parsed {len(pinned_ids)} pinned IDs from response")
+        else:
+            # Parse failure: don't boost any memories (no explicit signal)
+            # Retention filtering will fall back to keeping pinned memories from last turn
+            logger.warning(
+                "No <memory_retention> block found in response, no memories pinned"
+            )
+            # pinned_ids stays empty - no new pins without explicit LLM decision
 
-        return fingerprint, retained_texts
+        return fingerprint, pinned_ids
 
     def _format_recent_turns(
         self,

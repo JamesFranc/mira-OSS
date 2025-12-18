@@ -586,27 +586,19 @@ class PagerTool(Tool):
         Raises:
             ValueError: If Lattice service unavailable or not configured
         """
+        from clients.lattice_client import get_lattice_client
         import httpx
 
         try:
-            # Call Lattice discovery daemon API
-            response = httpx.get(
-                "http://localhost:1113/api/v1/identity",
-                timeout=5.0
-            )
-
-            if response.status_code == 200:
-                return response.json()
-            elif response.status_code == 404:
-                raise ValueError("Federation not configured - run lattice identity setup first")
-            else:
-                raise ValueError(f"Lattice service error: {response.status_code}")
-
+            client = get_lattice_client()
+            return client.get_identity()
         except httpx.ConnectError:
             raise ValueError(
-                "Cannot connect to Lattice discovery daemon at localhost:1113. "
+                "Cannot connect to Lattice discovery daemon. "
                 "Ensure the lattice-discovery service is running."
             )
+        except ValueError:
+            raise
         except Exception as e:
             raise ValueError(f"Failed to get Lattice identity: {e}")
 
@@ -819,42 +811,33 @@ class PagerTool(Tool):
             except:
                 location_dict = {'raw': location}
 
-        # Route through Lattice adapter
-        from lattice.lattice_adapter import LatticeAdapter
+        # Send via Lattice HTTP client
+        from clients.lattice_client import get_lattice_client
 
-        adapter = LatticeAdapter()
+        client = get_lattice_client()
 
         try:
-            result = adapter.send_federated_message(
+            result = client.send_message(
                 from_address=from_address,
                 to_address=recipient_address,
                 content=content,
-                authorized_user_id=self.user_id,
                 priority=priority,
-                message_type="pager",
-                location=location_dict,
-                device_secret=device_secret,
-                sender_fingerprint=sender['device_fingerprint']
+                metadata={"location": location_dict} if location_dict else None
             )
 
-            if result.get("success"):
-                self.logger.info(
-                    f"Queued federated message from {from_address} to {recipient_address} "
-                    f"(message_id: {result.get('message_id')})"
-                )
+            self.logger.info(
+                f"Queued federated message from {from_address} to {recipient_address} "
+                f"(message_id: {result.get('message_id')})"
+            )
 
-                return {
-                    "success": True,
-                    "message_id": result.get('message_id'),
-                    "status": "queued_for_federation",
-                    "from_address": from_address,
-                    "to_address": recipient_address,
-                    "message": f"Message queued for delivery to {recipient_address}"
-                }
-            else:
-                error_msg = result.get("error", "Unknown federation error")
-                self.logger.error(f"Lattice adapter rejected message: {error_msg}")
-                raise ValueError(f"Federation error: {error_msg}")
+            return {
+                "success": True,
+                "message_id": result.get("message_id"),
+                "status": "queued_for_federation",
+                "from_address": from_address,
+                "to_address": recipient_address,
+                "message": f"Message queued for delivery to {recipient_address}"
+            }
 
         except Exception as e:
             self.logger.error(f"Failed to queue federated message: {e}")

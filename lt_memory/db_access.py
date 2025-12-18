@@ -523,6 +523,77 @@ class LTMemoryDB:
                 # Step 3: Fetch and return updated memory
                 return self.get_memory(memory_id, user_id=resolved_user_id)
 
+    def apply_pin_boost(
+        self,
+        short_ids: List[str],
+        user_id: Optional[str] = None
+    ) -> int:
+        if not short_ids:
+            return 0
+
+        resolved_user_id = self._resolve_user_id(user_id)
+
+        with self.session_manager.get_session(resolved_user_id) as session:
+            with session.transaction():
+                like_patterns = [f"{sid.lower()}%" for sid in short_ids]
+
+                update_query = """
+                UPDATE memories m
+                SET
+                    access_count = access_count + 1,
+                    last_accessed = NOW(),
+                    activity_days_at_last_access = u.cumulative_activity_days
+                FROM users u
+                WHERE m.user_id = u.id
+                  AND (""" + " OR ".join([
+                    f"REPLACE(m.id::text, '-', '') LIKE %(pattern_{i})s"
+                    for i in range(len(like_patterns))
+                ]) + """)
+                RETURNING m.id
+                """
+
+                params = {f'pattern_{i}': p for i, p in enumerate(like_patterns)}
+                result = session.execute_query(update_query, params)
+                updated_count = len(result)
+
+                if updated_count > 0:
+                    memory_ids = [row['id'] for row in result]
+                    self._recalculate_importance_scores(memory_ids, session)
+                    logger.info(f"Applied pin boost to {updated_count} memories")
+
+                return updated_count
+
+    def apply_mention_boost(
+        self,
+        memory_ids: List[str],
+        user_id: Optional[str] = None
+    ) -> int:
+        if not memory_ids:
+            return 0
+
+        resolved_user_id = self._resolve_user_id(user_id)
+
+        with self.session_manager.get_session(resolved_user_id) as session:
+            with session.transaction():
+                update_query = """
+                UPDATE memories
+                SET mention_count = mention_count + 1
+                WHERE id = ANY(%(memory_ids)s::uuid[])
+                RETURNING id
+                """
+
+                result = session.execute_query(update_query, {
+                    'memory_ids': memory_ids
+                })
+                updated_count = len(result)
+
+                if updated_count > 0:
+                    updated_ids = [row['id'] for row in result]
+                    self._recalculate_importance_scores(updated_ids, session)
+                    logger.info(f"Applied mention boost to {updated_count} memories")
+
+                return updated_count
+
     def bulk_recalculate_scores(
         self,
         user_id: Optional[str] = None,

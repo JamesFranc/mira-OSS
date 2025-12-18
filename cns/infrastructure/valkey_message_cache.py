@@ -12,6 +12,7 @@ from cns.core.message import Message
 from clients.valkey_client import ValkeyClient
 from config import config
 from utils.user_context import get_current_user_id
+from utils.timezone_utils import parse_utc_time_string
 
 logger = logging.getLogger(__name__)
 
@@ -48,14 +49,6 @@ class ValkeyMessageCache:
         """Generate cache key for user continuum messages."""
         return f"{self.key_prefix}:{user_id}:messages"
 
-    def _get_thinking_budget_key(self, user_id: str) -> str:
-        """Generate cache key for thinking budget preference."""
-        return f"{self.key_prefix}:{user_id}:thinking_budget"
-
-    def _get_model_preference_key(self, user_id: str) -> str:
-        """Generate cache key for model preference."""
-        return f"{self.key_prefix}:{user_id}:model_preference"
-    
     def _serialize_messages(self, messages: List[Message]) -> str:
         """
         Serialize messages to JSON for storage.
@@ -96,7 +89,7 @@ class ValkeyMessageCache:
             # Parse created_at if present
             created_at = None
             if msg_dict.get('created_at'):
-                created_at = datetime.fromisoformat(msg_dict['created_at'])
+                created_at = parse_utc_time_string(msg_dict['created_at'])
             
             message = Message(
                 id=msg_dict['id'],
@@ -159,111 +152,9 @@ class ValkeyMessageCache:
 
         logger.debug(f"Cached continuum for user {user_id}")
 
-    def get_thinking_budget(self) -> Optional[int]:
-        """
-        Get thinking budget preference from Valkey cache.
-
-        Requires: Active user context (set via set_current_user_id during authentication)
-
-        Returns:
-            Thinking budget value if cached, None if not found in cache
-
-        Raises:
-            ValkeyError: If Valkey infrastructure is unavailable
-            RuntimeError: If no user context is set
-        """
-        user_id = get_current_user_id()
-        key = self._get_thinking_budget_key(user_id)
-        data = self.valkey.get(key)
-
-        if data:
-            try:
-                return int(data)
-            except (ValueError, TypeError):
-                logger.warning(f"Invalid thinking budget value in cache: {data}")
-                return None
-
-        return None
-
-    def set_thinking_budget(self, budget: Optional[int]) -> None:
-        """
-        Store thinking budget preference in Valkey.
-
-        Cache remains until explicitly invalidated by segment timeout handler.
-
-        Args:
-            budget: Thinking budget value (None, 0, or positive int)
-
-        Requires: Active user context (set via set_current_user_id during authentication)
-
-        Raises:
-            ValkeyError: If Valkey infrastructure is unavailable
-            RuntimeError: If no user context is set
-        """
-        user_id = get_current_user_id()
-        key = self._get_thinking_budget_key(user_id)
-
-        if budget is None:
-            # Delete key if budget is None (use system default)
-            self.valkey.delete(key)
-            logger.debug(f"Cleared thinking budget for user {user_id}")
-        else:
-            # Set without expiration - invalidation is event-driven
-            self.valkey.set(key, str(budget))
-            logger.debug(f"Set thinking budget to {budget} for user {user_id}")
-
-    def get_model_preference(self) -> Optional[str]:
-        """
-        Get model preference from Valkey cache.
-
-        Requires: Active user context (set via set_current_user_id during authentication)
-
-        Returns:
-            Model identifier if cached, None if not found (use system default)
-
-        Raises:
-            ValkeyError: If Valkey infrastructure is unavailable
-            RuntimeError: If no user context is set
-        """
-        user_id = get_current_user_id()
-        key = self._get_model_preference_key(user_id)
-        data = self.valkey.get(key)
-
-        if data:
-            return data
-
-        return None
-
-    def set_model_preference(self, model: Optional[str]) -> None:
-        """
-        Store model preference in Valkey.
-
-        Cache remains until explicitly invalidated by segment timeout handler.
-
-        Args:
-            model: Model identifier (None to use system default)
-
-        Requires: Active user context (set via set_current_user_id during authentication)
-
-        Raises:
-            ValkeyError: If Valkey infrastructure is unavailable
-            RuntimeError: If no user context is set
-        """
-        user_id = get_current_user_id()
-        key = self._get_model_preference_key(user_id)
-
-        if model is None:
-            # Delete key if model is None (use system default)
-            self.valkey.delete(key)
-            logger.debug(f"Cleared model preference for user {user_id}")
-        else:
-            # Set without expiration - invalidation is event-driven
-            self.valkey.set(key, model)
-            logger.debug(f"Set model preference to {model} for user {user_id}")
-
     def invalidate_continuum(self) -> bool:
         """
-        Invalidate continuum cache entry and session preferences.
+        Invalidate continuum cache entry.
 
         Requires: Active user context (set via set_current_user_id during authentication)
 
@@ -276,15 +167,10 @@ class ValkeyMessageCache:
         """
         user_id = get_current_user_id()
         messages_key = self._get_key(user_id)
-        thinking_budget_key = self._get_thinking_budget_key(user_id)
-        model_preference_key = self._get_model_preference_key(user_id)
 
-        # Delete all session keys
         messages_result = self.valkey.delete(messages_key)
-        self.valkey.delete(thinking_budget_key)
-        self.valkey.delete(model_preference_key)
 
         if messages_result:
-            logger.debug(f"Invalidated cached continuum and preferences for user {user_id}")
+            logger.debug(f"Invalidated cached continuum for user {user_id}")
 
         return bool(messages_result)

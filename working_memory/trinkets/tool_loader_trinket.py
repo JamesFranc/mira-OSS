@@ -227,38 +227,49 @@ class ToolLoaderTrinket(EventAwareTrinket):
 
         Returns formatted list of available and loaded tools.
         """
-        parts = []
+        parts = ["<tool_loader>"]
 
         # Available tools section
         if self.available_tools:
-            parts.append("=== AVAILABLE TOOLS ===")
-            parts.append("Use invokeother_tool to load these when needed:")
-            parts.append("")
+            parts.append("<available_tools>")
+            parts.append("<instruction>Use invokeother_tool to load these when needed:</instruction>")
             for tool_name, description in sorted(self.available_tools.items()):
-                # Format multi-line descriptions properly
+                # Format multi-line descriptions: first line is summary, rest is details
                 lines = description.split('\n')
-                parts.append(f"- {tool_name}: {lines[0]}")
-                for line in lines[1:]:
-                    if line.strip():
-                        parts.append(f"  {line}")
+                summary = lines[0]
+                details = '\n'.join(line for line in lines[1:] if line.strip())
+
+                if details:
+                    parts.append(f"<tool name=\"{tool_name}\">")
+                    parts.append(f"<description>{summary}</description>")
+                    parts.append(f"<details>{details}</details>")
+                    parts.append("</tool>")
+                else:
+                    parts.append(f"<tool name=\"{tool_name}\">")
+                    parts.append(f"<description>{summary}</description>")
+                    parts.append("</tool>")
+            parts.append("</available_tools>")
 
         # Currently loaded tools section
         if self.loaded_tools:
-            if parts:  # Add spacing if we had available tools
-                parts.append("")
-            parts.append("=== CURRENTLY LOADED TOOLS ===")
-            parts.append("")
-
+            parts.append("<loaded_tools>")
             for tool_name, tool_info in sorted(self.loaded_tools.items()):
                 idle_turns = self.current_turn - tool_info.last_used_turn
-                status = []
 
+                # Build attributes
+                attrs = [f'name="{tool_name}"']
                 if tool_info.is_fallback:
-                    status.append("fallback mode - will unload next turn")
+                    attrs.append('status="fallback"')
                 elif idle_turns > 0:
-                    status.append(f"idle {idle_turns} turn{'s' if idle_turns != 1 else ''}")
+                    attrs.append(f'status="idle" idle_turns="{idle_turns}"')
 
-                status_str = f" ({', '.join(status)})" if status else ""
-                parts.append(f"- {tool_name}{status_str}")
+                parts.append(f"<tool {' '.join(attrs)}/>")
+            parts.append("</loaded_tools>")
 
-        return "\n".join(parts) if parts else ""
+        parts.append("</tool_loader>")
+
+        # Return empty string if no actual content (only wrapper tags)
+        if len(parts) == 2:  # Just opening and closing tool_loader tags
+            return ""
+
+        return "\n".join(parts)

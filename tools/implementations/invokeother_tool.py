@@ -101,6 +101,17 @@ class InvokeOtherTool(Tool):
                         self.logger.debug(f"Skipping disabled tool {tool_name} in hints")
                         continue
 
+                # Skip gated tools that are not currently available
+                if tool_name in self.tool_repo.gated_tools:
+                    try:
+                        tool = self.tool_repo.get_tool(tool_name)
+                        if not (hasattr(tool, 'is_available') and tool.is_available()):
+                            self.logger.debug(f"Skipping unavailable gated tool {tool_name} in hints")
+                            continue
+                    except Exception as e:
+                        self.logger.debug(f"Skipping gated tool {tool_name} (availability check failed): {e}")
+                        continue
+
                 try:
                     # Get tool instance to access simple_description
                     tool = self.tool_repo.get_tool(tool_name)
@@ -191,6 +202,19 @@ class InvokeOtherTool(Tool):
                     if not is_enabled:
                         errors.append(f"{tool_name} is disabled in config (enabled=false)")
                         self.logger.warning(f"Attempted to load disabled tool: {tool_name}")
+                        continue
+
+                # Check if gated tool is available
+                if tool_name in self.tool_repo.gated_tools:
+                    try:
+                        tool = self.tool_repo.get_tool(tool_name)
+                        if not (hasattr(tool, 'is_available') and tool.is_available()):
+                            errors.append(f"{tool_name} is not currently available (gated)")
+                            self.logger.debug(f"Attempted to load unavailable gated tool: {tool_name}")
+                            continue
+                    except Exception as e:
+                        errors.append(f"{tool_name}: availability check failed")
+                        self.logger.warning(f"Gated tool availability check failed for {tool_name}: {e}")
                         continue
 
                 # Check if already enabled
@@ -358,3 +382,4 @@ class InvokeOtherTool(Tool):
                 "success": False,
                 "message": f"Fallback mode failed: {str(e)}"
             }
+

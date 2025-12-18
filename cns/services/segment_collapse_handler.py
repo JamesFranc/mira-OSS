@@ -68,7 +68,7 @@ class SegmentCollapseHandler:
         self.event_bus.subscribe('SegmentTimeoutEvent', self.handle_timeout)
         logger.info("SegmentCollapseHandler subscribed to SegmentTimeoutEvent")
 
-    def handle_timeout(self, event: SegmentTimeoutEvent) -> None:
+    def handle_timeout(self, event: SegmentTimeoutEvent) -> Optional[Message]:
         """
         Handle segment timeout by collapsing the segment.
 
@@ -77,6 +77,9 @@ class SegmentCollapseHandler:
 
         Args:
             event: SegmentTimeoutEvent with segment details
+
+        Returns:
+            Collapsed sentinel Message on success, None if sentinel not found
         """
         # Set user context once at entry point
         set_current_user_id(event.user_id)
@@ -102,7 +105,7 @@ class SegmentCollapseHandler:
                     f"Data consistency violation - timeout event published for non-existent segment. "
                     f"Segment will remain in timeout queue and retry."
                 )
-                return
+                return None
 
             # Load messages in segment (between this sentinel and next, or end of continuum)
             messages = self._load_segment_messages(
@@ -170,6 +173,9 @@ class SegmentCollapseHandler:
                 messages
             )
 
+            # Cleanup Files API uploads for this segment
+            self._cleanup_segment_files(event.segment_id)
+
             # Publish manifest updated event (for cache invalidation)
             self.event_bus.publish(ManifestUpdatedEvent.create(
                 continuum_id=event.continuum_id,
@@ -178,10 +184,7 @@ class SegmentCollapseHandler:
 
             logger.info(f"Successfully collapsed segment {event.segment_id}")
 
-            # Reset thinking budget preference to system default after segment collapse
-            continuum = self.continuum_pool.get_or_create()
-            continuum.set_thinking_budget_preference(None)
-            logger.debug(f"Reset thinking budget preference to system default after segment collapse")
+            return collapsed_sentinel
 
         except Exception as e:
             # Collapse failure - segment remains active and will retry on next timeout check
@@ -192,6 +195,7 @@ class SegmentCollapseHandler:
                 f"Operators should investigate if this persists. Error: {e}",
                 exc_info=True
             )
+            return None
 
     def _find_segment_sentinel(
         self,
@@ -400,6 +404,29 @@ class SegmentCollapseHandler:
 
         return sorted(list(tools_used))
 
+    def _cleanup_segment_files(self, segment_id: str) -> None:
+        """
+        Cleanup Files API uploads for collapsed segment.
+
+        Called after segment collapse to delete uploaded files from Anthropic storage.
+        Files are tracked per-segment and deleted when segment is archived.
+
+        Args:
+            segment_id: Segment UUID to cleanup files for
+        """
+        try:
+            from clients.files_manager import FilesManager
+            from cns.services.orchestrator import get_orchestrator
+
+            orchestrator = get_orchestrator()
+            files_manager = FilesManager(orchestrator.llm_provider.anthropic_client)
+            files_manager.cleanup_segment_files(segment_id)
+
+            logger.debug(f"Cleaned up Files API uploads for segment {segment_id}")
+        except Exception as e:
+            # Log but don't fail segment collapse on cleanup errors
+            logger.warning(f"Failed to cleanup Files API uploads for segment {segment_id}: {e}")
+
     def _count_user_segments(self) -> int:
         """
         Count total segments for user (for ManifestUpdatedEvent).
@@ -433,3 +460,41 @@ class SegmentCollapseHandler:
             logger.info("SegmentCollapseHandler unsubscribed from events")
         except Exception as e:
             logger.warning(f"Error unsubscribing from events: {e}")
+
+
+# =============================================================================
+# SINGLETON ACCESS
+# =============================================================================
+
+_collapse_handler_instance: Optional[SegmentCollapseHandler] = None
+
+
+def get_segment_collapse_handler() -> SegmentCollapseHandler:
+    """
+    Get singleton SegmentCollapseHandler instance.
+
+    Returns:
+        The initialized SegmentCollapseHandler
+
+    Raises:
+        RuntimeError: If handler not initialized (factory not run)
+    """
+    global _collapse_handler_instance
+    if _collapse_handler_instance is None:
+        raise RuntimeError(
+            "SegmentCollapseHandler not initialized. "
+            "Ensure CNSIntegrationFactory has been initialized."
+        )
+    return _collapse_handler_instance
+
+
+def initialize_segment_collapse_handler(handler: SegmentCollapseHandler) -> None:
+    """
+    Initialize the singleton handler instance (called by factory).
+
+    Args:
+        handler: The handler instance to store
+    """
+    global _collapse_handler_instance
+    _collapse_handler_instance = handler
+    logger.info("SegmentCollapseHandler singleton initialized")

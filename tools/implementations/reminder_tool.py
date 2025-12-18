@@ -23,7 +23,7 @@ from utils.timezone_utils import (
     format_datetime, parse_time_string, utc_now, ensure_utc, format_utc_iso,
     parse_utc_time_string, convert_from_utc, get_timezone_instance, convert_to_utc
 )
-from utils.user_context import get_user_timezone
+from utils.user_context import get_user_preferences
 
 
 class ReminderToolConfig(BaseModel):
@@ -333,7 +333,7 @@ class ReminderTool(Tool):
         response_reminder = self._format_reminder_for_display(reminder)
         
         # Convert reminder time to user's local timezone for the message
-        user_tz = get_user_timezone()
+        user_tz = get_user_preferences().timezone
         local_reminder_time = convert_from_utc(reminder_date, user_tz)
         formatted_local_time = format_datetime(local_reminder_time, 'date_time', include_timezone=True)
         
@@ -386,7 +386,7 @@ class ReminderTool(Tool):
             raise ValueError(f"Invalid date_type: {date_type}. Must be one of {valid_date_types}")
             
         # Use user's local timezone for day boundaries, then convert to UTC
-        user_tz = get_user_timezone()
+        user_tz = get_user_preferences().timezone
         today_local = convert_to_timezone(utc_now(), user_tz).replace(hour=0, minute=0, second=0, microsecond=0)
         today = convert_to_timezone(today_local, "UTC")
         
@@ -566,11 +566,33 @@ class ReminderTool(Tool):
             'id = :id',
             {'id': reminder_id}
         )
-        
-        # Get updated reminder
+
+        # Verify the update actually happened
+        if rows_updated == 0:
+            self.logger.error(
+                f"UPDATE affected 0 rows for reminder '{reminder_id}' - "
+                f"SELECT found it but UPDATE didn't match. This indicates a persistence bug."
+            )
+            raise ValueError(f"Failed to update reminder '{reminder_id}' - no rows affected")
+
+        # Get updated reminder and verify completion state
         updated_reminders = self.db.select('reminders', 'id = :id', {'id': reminder_id})
         if updated_reminders:
             updated_reminder = updated_reminders[0]
+
+            # Verify the completed flag is actually set
+            completed_value = updated_reminder.get('completed')
+            if not completed_value or str(completed_value) == '0':
+                self.logger.error(
+                    f"PERSISTENCE BUG: Reminder '{reminder_id}' still shows completed={completed_value} "
+                    f"after UPDATE with rows_updated={rows_updated}. "
+                    f"DB path: {self.db.db_path}"
+                )
+                raise ValueError(
+                    f"Reminder update failed to persist - completed={completed_value} after commit"
+                )
+
+            self.logger.info(f"Reminder '{reminder_id}' successfully marked complete (rows_updated={rows_updated})")
             return {
                 "reminder": self._format_reminder_for_display(updated_reminder),
                 "message": f"Reminder '{updated_reminder['encrypted__title']}' marked as completed"
@@ -773,7 +795,7 @@ class ReminderTool(Tool):
 
         Returns a timezone-aware datetime object in UTC.
         """
-        user_tz = get_user_timezone()
+        user_tz = get_user_preferences().timezone
         ds = (date_str or "").strip().lower()
 
         # Handle simple natural language
@@ -820,13 +842,9 @@ class ReminderTool(Tool):
             dt = parse_time_string(date_str, tz_name=user_tz)
             return ensure_utc(dt)
         except Exception:
-            # Final attempt: strict ISO then localize if naive
+            # Final attempt: strict ISO parsing
             try:
-                parsed_dt = datetime.fromisoformat(date_str)
-                if parsed_dt.tzinfo is None:
-                    tz_instance = get_timezone_instance(user_tz)
-                    parsed_dt = parsed_dt.replace(tzinfo=tz_instance)
-                return ensure_utc(parsed_dt)
+                return parse_utc_time_string(date_str)
             except Exception:
                 raise ValueError(
                     f"Invalid date format: '{date_str}'. Please use ISO 8601 (YYYY-MM-DDTHH:MM:SS) "

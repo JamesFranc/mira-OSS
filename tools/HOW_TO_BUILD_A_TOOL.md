@@ -118,7 +118,7 @@ Example: If a spec mentions "no notification fatigue," this implies rate limitin
 tools/repo.py                   # Base Tool class, ToolRepository
 utils/userdata_manager.py       # Database API (self.db operations)
 utils/timezone_utils.py         # utc_now(), format_utc_iso(), etc.
-utils/user_context.py           # get_current_user_id(), get_user_timezone()
+utils/user_context.py           # get_current_user_id(), get_user_preferences()
 ```
 
 **Critical:** Deviating from established patterns causes integration issues and maintenance debt. Always check the Pattern Index first.
@@ -339,9 +339,9 @@ return {"success": True, "file_path": str(full_path)}
 
 ```python
 from utils.timezone_utils import (
-    utc_now, format_utc_iso, parse_utc_time_string,
-    get_user_timezone, convert_from_utc
+    utc_now, format_utc_iso, parse_utc_time_string, convert_from_utc
 )
+from utils.user_context import get_user_preferences
 
 # Store as UTC ISO strings (ALWAYS)
 timestamp = format_utc_iso(utc_now())
@@ -351,7 +351,7 @@ self.db.insert('items', {'created_at': timestamp})
 stored_dt = parse_utc_time_string(item['created_at'])
 
 # Convert to user's timezone ONLY for display
-user_tz = get_user_timezone()
+user_tz = get_user_preferences().timezone
 local_dt = convert_from_utc(stored_dt, user_tz)
 display_string = format_datetime(local_dt, "date_time_short")
 ```

@@ -75,19 +75,25 @@ class TurnCompletedEvent(ContinuumCheckpointEvent):
     published before persistence completes, causing handlers to see stale data. This is
     why TurnCompletedEvent carries the continuum object directly. When events carry data,
     handlers get correct state regardless of persistence timing.
+
+    segment_turn_number is the authoritative turn count within the current segment,
+    incremented at API entry point when real user messages arrive (not synthetic
+    continuation prompts or injected system messages).
     """
     turn_number: int
+    segment_turn_number: int  # Turn count within current segment (1-indexed)
     continuum: Any  # Continuum object - using Any to avoid circular import
 
     @classmethod
     def create(cls, continuum_id: str, turn_number: int,
-               continuum: Any) -> 'TurnCompletedEvent':
+               segment_turn_number: int, continuum: Any) -> 'TurnCompletedEvent':
         """
         Create turn completed event with auto-generated metadata.
 
         Args:
             continuum_id: Continuum identifier
             turn_number: Current turn number (calculated from message count)
+            segment_turn_number: Turn number within current segment (1-indexed)
             continuum: Continuum object reference for handler access
         """
         from utils.user_context import get_current_user_id
@@ -98,6 +104,7 @@ class TurnCompletedEvent(ContinuumCheckpointEvent):
             event_id=str(uuid4()),
             occurred_at=utc_now(),
             turn_number=turn_number,
+            segment_turn_number=segment_turn_number,
             continuum=continuum
         )
 

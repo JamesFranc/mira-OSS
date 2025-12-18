@@ -14,7 +14,7 @@ import pytz
 from typing import Optional
 
 from utils.timezone_utils import utc_now
-from utils.user_context import get_current_user, update_current_user, get_user_timezone
+from utils.user_context import get_current_user, update_current_user, get_user_preferences
 from utils.database_session_manager import get_shared_session_manager
 
 logger = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ def increment_user_activity_day(user_id: str) -> int:
         return user_data.get('cumulative_activity_days', 0)
 
     # Get user's local date (not server date)
-    user_tz = pytz.timezone(get_user_timezone())
+    user_tz = pytz.timezone(get_user_preferences().timezone)
     user_local_date = utc_now().astimezone(user_tz).date()
 
     session_manager = get_shared_session_manager()

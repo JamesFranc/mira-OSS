@@ -2,16 +2,25 @@
 Event-aware base trinket class.
 
 Provides common functionality for all trinkets to participate in the
-event-driven working memory system.
+event-driven working memory system. Persists content to Valkey for
+API access and monitoring.
 """
+import json
 import logging
 from typing import Dict, Any, TYPE_CHECKING
+
+from clients.valkey_client import get_valkey_client
+from utils.user_context import get_current_user_id
+from utils.timezone_utils import utc_now, format_utc_iso
 
 if TYPE_CHECKING:
     from cns.integration.event_bus import EventBus
     from working_memory.core import WorkingMemory
 
 logger = logging.getLogger(__name__)
+
+# Valkey key prefix for trinket content storage
+TRINKET_KEY_PREFIX = "trinkets"
 
 
 class EventAwareTrinket:
@@ -62,8 +71,8 @@ class EventAwareTrinket:
         """
         Handle an update request from working memory.
 
-        Generates content and publishes it. Infrastructure failures propagate
-        to the event handler in core.py for proper isolation and logging.
+        Generates content, persists to Valkey, and publishes it. Infrastructure
+        failures propagate to the event handler in core.py for proper isolation.
 
         Args:
             event: UpdateTrinketEvent with context
@@ -74,8 +83,11 @@ class EventAwareTrinket:
         # Generate content - let infrastructure failures propagate
         content = self.generate_content(event.context)
 
-        # Publish if we have content
+        # Publish and persist if we have content
         if content and content.strip():
+            # Persist to Valkey for API access
+            self._persist_to_valkey(content)
+
             self.event_bus.publish(TrinketContentEvent.create(
                 continuum_id=event.continuum_id,
                 variable_name=self._variable_name,
@@ -84,6 +96,28 @@ class EventAwareTrinket:
                 cache_policy=self.cache_policy
             ))
             logger.debug(f"{self.__class__.__name__} published content ({len(content)} chars, cache={self.cache_policy})")
+
+    def _persist_to_valkey(self, content: str) -> None:
+        """
+        Persist trinket content to Valkey for API access.
+
+        Stores content in a user-scoped hash with metadata for monitoring.
+        Uses hset_with_retry for transient failure handling.
+
+        Args:
+            content: Generated trinket content
+        """
+        user_id = get_current_user_id()
+        hash_key = f"{TRINKET_KEY_PREFIX}:{user_id}"
+
+        value = json.dumps({
+            "content": content,
+            "cache_policy": self.cache_policy,
+            "updated_at": format_utc_iso(utc_now())
+        })
+
+        valkey = get_valkey_client()
+        valkey.hset_with_retry(hash_key, self._variable_name, value)
     
     def generate_content(self, context: Dict[str, Any]) -> str:
         """

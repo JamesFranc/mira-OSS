@@ -19,7 +19,7 @@ class ApiConfig(BaseModel):
     execution_model: str = Field(default="openai/gpt-oss-20b", description="Faster model for simple tool operations (dynamic routing)")
     execution_endpoint: str = Field(default="https://api.groq.com/openai/v1/chat/completions", description="OpenAI-compatible endpoint for execution model")
     execution_api_key_name: str = Field(default="groq_key", description="Vault key name for execution model API key")
-    simple_tools: List[str] = Field(default=["reminder_tool", "punchclock_tool", "weather_tool"], description="Tools that don't require reasoning model capabilities")
+    simple_tools: List[str] = Field(default=["reminder_tool", "punchclock_tool", "weather_tool", "domaindoc_tool"], description="Tools that don't require reasoning model capabilities")
 
     # API key configuration
     api_key_name: str = Field(default="anthropic_key", description="Name of the Anthropic API key to retrieve from Vault")
@@ -35,6 +35,9 @@ class ApiConfig(BaseModel):
 
     # Prompt caching (Anthropic-specific)
     enable_prompt_caching: bool = Field(default=True, description="Enable prompt caching for system prompts and tools (reduces costs by ~90% on cached content)")
+
+    # Files API (Anthropic-specific)
+    files_api_max_size_mb: int = Field(default=32, description="Maximum file size for Files API uploads (Anthropic limit)")
 
     # Emergency fallback settings (defaults to local Ollama - no API key required)
     emergency_fallback_enabled: bool = Field(default=True, description="Enable automatic failover to emergency provider on Anthropic errors")
@@ -82,7 +85,6 @@ class PathConfig(BaseModel):
     tools_dir: str = Field(default="tools/implementations", description="Directory containing tools")
 
 
-
 class InvokeOtherToolConfig(BaseModel):
     """Configuration for invokeother_tool dynamic tool loader."""
     enabled: bool = Field(default=True, description="Whether invokeother_tool is enabled")
@@ -94,8 +96,14 @@ class ToolConfig(BaseModel):
 
     enabled: bool = Field(default=True, description="Whether tools are enabled")
     timeout: int = Field(default=30, description="Default timeout in seconds for tool operations")
-    essential_tools: List[str] = Field(default=["web_tool", "reminder_tool", "invokeother_tool"], description="List of essential tools (warns if disabled)")
-    invokeother_tool: InvokeOtherToolConfig = Field(default_factory=InvokeOtherToolConfig, description="Configuration for the invokeother_tool dynamic loader")
+    essential_tools: List[str] = Field(
+        default=["web_tool", "invokeother_tool", "getcontext_tool"],
+        description="List of essential tools (warns if disabled)"
+    )
+    invokeother_tool: InvokeOtherToolConfig = Field(
+        default_factory=InvokeOtherToolConfig,
+        description="Configuration for the invokeother_tool dynamic loader"
+    )
     # Synthetic data generator settings
     synthetic_data_analysis_model: str = Field(default="claude-3-7-sonnet-20250219", description="LLM model to use for code analysis and example review in synthetic data analysis")
     synthetic_data_generation_model: str = Field(default="claude-haiku-4-5", description="LLM model to use for example generation in synthetic data generation")
@@ -162,7 +170,6 @@ class SystemConfig(BaseModel):
     timezone: str = Field(default="America/Chicago", description="Default timezone for date/time operations (must be a valid IANA timezone name like 'America/New_York', 'Europe/London')")
     streaming: bool = Field(default=True, description="Whether to stream responses from the API")
     json_indent: int = Field(default=2, description="Indentation level for JSON output")
-    max_tool_iterations: int = Field(default=10, description="Maximum number of tool iterations for a single request")
     continuum_pool_size: int = Field(default=100, description="Maximum number of conversations to keep in memory pool for performance")
 
     # Segment Timeout Threshold (minutes)
@@ -396,10 +403,10 @@ class ProactiveConfig(BaseModel):
     Controls memory surfacing behavior for CNS integration.
     """
     similarity_threshold: float = Field(
-        default=0.265,
+        default=0.42,
         ge=0.0,
         le=1.0,
-        description="Minimum similarity score for surfacing memories (calibrated for mdbr-leaf-ir-asym)"
+        description="Minimum cosine similarity for surfacing memories"
     )
     max_link_traversal_depth: int = Field(
         default=3,
@@ -414,6 +421,21 @@ class ProactiveConfig(BaseModel):
         ge=0.0,
         le=1.0,
         description="Minimum importance score for surfacing"
+    )
+    evacuation_trigger_threshold: int = Field(
+        default=15,
+        ge=1,
+        description="Number of pinned anchors that triggers evacuation evaluation"
+    )
+    evacuation_target_count: int = Field(
+        default=7,
+        ge=1,
+        description="Target number of anchors to retain after evacuation"
+    )
+    evacuation_conversation_window: int = Field(
+        default=12,
+        ge=4,
+        description="Number of recent message pairs for evacuation context (larger than fingerprint's 6)"
     )
 
 
@@ -493,5 +515,22 @@ class LTMemoryConfig(BaseModel):
     ivfflat_lists: int = Field(
         default=0,
         description="Number of lists for IVFFlat vector index (0 = no index, better for small datasets)"
+    )
+
+
+class LatticeConfig(BaseModel):
+    """Lattice federation service configuration."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Whether Lattice federation is enabled"
+    )
+    service_url: str = Field(
+        default="http://localhost:1113",
+        description="URL of the Lattice discovery service"
+    )
+    timeout: int = Field(
+        default=30,
+        description="HTTP request timeout in seconds"
     )
 

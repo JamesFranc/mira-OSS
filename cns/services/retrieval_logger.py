@@ -68,7 +68,9 @@ class RetrievalLogger:
                 {
                     "id": str(m.get("id", "")),
                     "text": m.get("text", "")[:200],  # Truncate for readability
-                    "similarity": round(m.get("similarity_score", 0.0), 3)
+                    "similarity": round(m.get("similarity_score", 0.0), 3),  # Sigmoid-normalized RRF
+                    "cosine": round(m.get("vector_similarity") or 0.0, 3),  # Raw cosine similarity
+                    "raw_rrf": round(m.get("_raw_rrf_score") or 0.0, 6),  # Raw RRF before sigmoid
                 }
                 for m in surfaced_memories[:10]  # Limit to top 10
             ],

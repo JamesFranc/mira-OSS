@@ -111,6 +111,16 @@ class ExtractionBatchResultHandler(BatchResultProcessor):
                     else:
                         logger.info(f"Batch {batch_id} chunk {batch.custom_id}: no memories extracted")
 
+                    # Apply importance boosts to existing memories
+                    memory_context = batch.memory_context or {}
+                    pinned_short_ids = memory_context.get("pinned_short_ids", [])
+                    if pinned_short_ids:
+                        self.db.apply_pin_boost(pinned_short_ids, user_id=batch.user_id)
+
+                    mentioned_ids = memory_context.get("mentioned_memory_ids", [])
+                    if mentioned_ids:
+                        self.db.apply_mention_boost(mentioned_ids, user_id=batch.user_id)
+
                     # Delete batch record - processing complete
                     self.db.delete_extraction_batch(batch.id, user_id=batch.user_id)
                     return True

@@ -9,7 +9,14 @@
   {
     "dependencies": [],
     "description": "Base class for all tools",
-    "name": "continuumsearch_tool",
+    "name": "continuum_tool",
+    "parameters": {},
+    "required_parameters": []
+  },
+  {
+    "dependencies": [],
+    "description": "Base class for all tools",
+    "name": "domaindoc_tool",
     "parameters": {},
     "required_parameters": []
   },
@@ -30,14 +37,14 @@
   {
     "dependencies": [],
     "description": "Base class for all tools",
-    "name": "invokeother_tool",
+    "name": "kasa_tool",
     "parameters": {},
     "required_parameters": []
   },
   {
     "dependencies": [],
-    "description": "Base class for all tools",
-    "name": "kasa_tool",
+    "description": "Location services: geocoding, place details, nearby search, and distance calculation",
+    "name": "maps_tool",
     "parameters": {},
     "required_parameters": []
   },

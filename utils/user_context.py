@@ -10,11 +10,14 @@ concurrent operations while working identically for single-threaded use.
 """
 
 import contextvars
+from dataclasses import dataclass
 from typing import Dict, Any, Optional
+
+from pydantic import BaseModel, Field
 
 # Context variable for current user data
 _user_context: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
-    'user_context', 
+    'user_context',
     default=None
 )
 
@@ -55,10 +58,10 @@ def set_current_user_data(user_data: Dict[str, Any]) -> None:
 def get_current_user() -> Dict[str, Any]:
     """
     Get current user data from context.
-    
+
     Returns:
         Copy of current user data dictionary
-        
+
     Raises:
         RuntimeError: If no user context is set
     """
@@ -71,7 +74,7 @@ def get_current_user() -> Dict[str, Any]:
 def update_current_user(updates: Dict[str, Any]) -> None:
     """
     Update current user data with new values.
-    
+
     Args:
         updates: Dictionary of updates to apply
     """
@@ -83,7 +86,7 @@ def update_current_user(updates: Dict[str, Any]) -> None:
 def clear_user_context() -> None:
     """
     Clear the current user context.
-    
+
     Useful for cleanup or testing scenarios.
     """
     _user_context.set(None)
@@ -100,73 +103,141 @@ def has_user_context() -> bool:
     return context is not None and "user_id" in context
 
 
-def get_user_timezone() -> str:
+# ============================================================
+# AccountTiers - Database-backed tier definitions
+# ============================================================
+
+@dataclass(frozen=True)
+class TierConfig:
+    """LLM configuration for a tier."""
+    name: str
+    model: str
+    thinking_budget: int
+    description: str
+
+
+# Module-level cache for tiers (loaded once per process)
+_tiers_cache: Optional[dict[str, TierConfig]] = None
+
+
+def get_account_tiers() -> dict[str, TierConfig]:
     """
-    Get current user's timezone with fallback to system default.
-
-    Context caching ensures we only query the database once per session,
-    with subsequent calls returning the cached value.
-
-    Returns:
-        IANA timezone name (user preference if set, otherwise system default)
-
-    Raises:
-        RuntimeError: If no user context is set
-        Exception: If database query fails (propagates database errors)
+    Get all available account tiers from database.
+    Cached at module level (tiers rarely change).
     """
-    # Rapidpath: Check if already cached in context
-    try:
-        user_data = get_current_user()
-        if 'timezone' in user_data:
-            return user_data['timezone']
-    except RuntimeError:
-        raise RuntimeError("No user context set. Cannot get timezone without user context.")
+    global _tiers_cache
+    if _tiers_cache is not None:
+        return _tiers_cache
 
-    # Not cached - query database
+    from clients.postgres_client import PostgresClient
+    db = PostgresClient('mira_service')
+
+    results = db.execute_query(
+        "SELECT name, model, thinking_budget, description FROM account_tiers ORDER BY display_order"
+    )
+
+    _tiers_cache = {
+        row['name']: TierConfig(
+            name=row['name'],
+            model=row['model'],
+            thinking_budget=row['thinking_budget'],
+            description=row['description'] or ''
+        )
+        for row in results
+    }
+    return _tiers_cache
+
+
+def resolve_tier(tier_name: str) -> TierConfig:
+    """Get LLM config for a tier name."""
+    tiers = get_account_tiers()
+    if tier_name not in tiers:
+        raise ValueError(f"Unknown tier: {tier_name}")
+    return tiers[tier_name]
+
+
+# ============================================================
+# UserPreferences - Database-backed user settings
+# ============================================================
+
+class UserPreferences(BaseModel):
+    """
+    User preferences loaded from database.
+    Cached in contextvars after first load per request.
+    """
+    timezone: str = Field(default="America/Chicago")
+    memory_manipulation_enabled: bool = Field(default=True)
+    llm_tier: str = Field(default="balanced")
+
+
+def get_user_preferences() -> UserPreferences:
+    """
+    Get current user's preferences with context caching.
+
+    Loads all preferences in a single query on first access,
+    caches for subsequent calls in the request lifecycle.
+    """
+    user_data = get_current_user()
+    if '_preferences' in user_data:
+        return user_data['_preferences']
+
     user_id = get_current_user_id()
 
     from clients.postgres_client import PostgresClient
     db = PostgresClient('mira_service')
 
-    # Let database errors propagate - caller can decide fallback strategy
     result = db.execute_single(
-        "SELECT timezone FROM users WHERE id = %s",
+        """SELECT timezone, memory_manipulation_enabled, llm_tier
+           FROM users WHERE id = %s""",
         (user_id,)
     )
 
-    # Determine timezone (preference or system default)
-    if result and result['timezone']:
-        timezone = result['timezone']
-    else:
-        from config import config
-        timezone = config.system.timezone
+    prefs = UserPreferences(
+        timezone=result.get('timezone') or 'America/Chicago',
+        memory_manipulation_enabled=result.get('memory_manipulation_enabled', True),
+        llm_tier=result.get('llm_tier') or 'balanced',
+    )
 
-    # Cache for subsequent calls
-    update_current_user({'timezone': timezone})
-
-    return timezone
+    update_current_user({'_preferences': prefs})
+    return prefs
 
 
-def set_user_timezone(timezone: str) -> None:
+def update_user_preference(field: str, value: Any) -> UserPreferences:
     """
-    Update user's timezone preference in database.
+    Update a single preference field in database and cache.
 
     Args:
-        timezone: IANA timezone name to set as user preference
+        field: Preference field name (timezone, llm_tier, etc.)
+        value: New value for the field
+
+    Returns:
+        Updated UserPreferences object
     """
+    if field not in UserPreferences.model_fields:
+        raise ValueError(f"Unknown preference field: {field}")
+
     user_id = get_current_user_id()
 
     from clients.postgres_client import PostgresClient
     db = PostgresClient('mira_service')
 
     db.execute_update(
-        "UPDATE users SET timezone = %s WHERE id = %s",
-        (timezone, user_id)
+        f"UPDATE users SET {field} = %s WHERE id = %s",
+        (value, user_id)
     )
 
-    # Invalidate cache so next get_user_timezone() reflects the update
-    update_current_user({'timezone': timezone})
+    # Invalidate cache and reload
+    current = _user_context.get() or {}
+    if '_preferences' in current:
+        del current['_preferences']
+        _user_context.set(current)
 
+    return get_user_preferences()
+
+
+# ============================================================
+# Activity tracking (not a preference - computed value)
+# ============================================================
 
 def get_user_cumulative_activity_days() -> int:
     """

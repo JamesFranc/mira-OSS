@@ -20,6 +20,7 @@ from config.config import (
     EmbeddingsConfig,
     LTMemoryConfig,
     DomainKnowledgeConfig,
+    LatticeConfig,
 )
 
 # Import the registry from tools package
@@ -37,6 +38,7 @@ class AppConfig(BaseModel):
     embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     lt_memory: LTMemoryConfig = Field(default_factory=LTMemoryConfig)
     domain_knowledge: DomainKnowledgeConfig = Field(default_factory=DomainKnowledgeConfig)
+    lattice: LatticeConfig = Field(default_factory=LatticeConfig)
     
     # System prompt loaded once at startup
     system_prompt_text: str = Field(default="", exclude=True)

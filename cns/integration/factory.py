@@ -53,6 +53,7 @@ class CNSIntegrationFactory:
         self._session_cache_loader = None
         self._pointer_summary_coordinator = None
         self._fingerprint_generator = None
+        self._memory_evacuator = None
         
     def create_orchestrator(self) -> ContinuumOrchestrator:
         """
@@ -92,6 +93,9 @@ class CNSIntegrationFactory:
         # Create fingerprint generator for retrieval query expansion
         fingerprint_generator = self._get_fingerprint_generator(llm_provider)
 
+        # Create memory evacuator for curating pinned memories under pressure
+        memory_evacuator = self._get_memory_evacuator(llm_provider)
+
         # Initialize session cache loader
         self._initialize_session_cache(continuum_repo, event_bus)
 
@@ -101,6 +105,9 @@ class CNSIntegrationFactory:
 
         # Initialize segment collapse handler with event bus
         self._initialize_segment_collapse_handler(event_bus)
+
+        # Initialize UserDataManager cleanup handler for session collapse cleanup
+        self._initialize_userdata_cleanup_handler(event_bus)
 
         # Initialize manifest query service with event bus
         self._initialize_manifest_query_service(event_bus)
@@ -114,7 +121,8 @@ class CNSIntegrationFactory:
             tag_parser=tag_parser,
             fingerprint_generator=fingerprint_generator,
             memory_relevance_service=memory_relevance_service,
-            event_bus=event_bus
+            event_bus=event_bus,
+            memory_evacuator=memory_evacuator
         )
 
         logger.info("CNS orchestrator initialized successfully with full integration")
@@ -151,23 +159,21 @@ class CNSIntegrationFactory:
             # Create and register trinkets with event bus
             from working_memory.trinkets.time_manager import TimeManager
             from working_memory.trinkets.reminder_manager import ReminderManager
-            from working_memory.trinkets.user_info_trinket import UserInfoTrinket
             from working_memory.trinkets.manifest_trinket import ManifestTrinket
             from working_memory.trinkets.proactive_memory_trinket import ProactiveMemoryTrinket
             from working_memory.trinkets.tool_guidance_trinket import ToolGuidanceTrinket
             from working_memory.trinkets.punchclock_trinket import PunchclockTrinket
-            from working_memory.trinkets.domain_knowledge_trinket import DomainKnowledgeTrinket
+            from working_memory.trinkets.domaindoc_trinket import DomaindocTrinket
             from working_memory.trinkets.getcontext_trinket import GetContextTrinket
 
             # Trinkets self-register with working memory
             TimeManager(event_bus, self._working_memory)
             ReminderManager(event_bus, self._working_memory)
-            UserInfoTrinket(event_bus, self._working_memory)
             ManifestTrinket(event_bus, self._working_memory)
             ProactiveMemoryTrinket(event_bus, self._working_memory)
             ToolGuidanceTrinket(event_bus, self._working_memory)
             PunchclockTrinket(event_bus, self._working_memory)
-            DomainKnowledgeTrinket(event_bus, self._working_memory)
+            DomaindocTrinket(event_bus, self._working_memory)
             GetContextTrinket(event_bus, self._working_memory)
             
             logger.info("Event-driven working memory initialized with trinkets")
@@ -191,8 +197,18 @@ class CNSIntegrationFactory:
             self._tool_repo.discover_tools()
             self._tool_repo.enable_tools_from_config()
 
+            # Register gated tools - tools that self-determine availability
+            self._register_gated_tools()
+
             logger.info(f"Tool repository initialized with {len(self._tool_repo.get_enabled_tools())} enabled tools")
         return self._tool_repo
+
+    def _register_gated_tools(self) -> None:
+        """Register tools that self-determine their availability via is_available()."""
+        # domaindoc_tool appears when any domaindoc is enabled
+        if "domaindoc_tool" in self._tool_repo.list_all_tools():
+            self._tool_repo.register_gated_tool("domaindoc_tool")
+            logger.info("Registered domaindoc_tool as gated tool")
 
     def _get_tag_parser(self) -> TagParser:
         """Get or create tag parser instance."""
@@ -288,25 +304,36 @@ class CNSIntegrationFactory:
             logger.info("FingerprintGenerator initialized")
         return self._fingerprint_generator
 
+    def _get_memory_evacuator(self, llm_provider: LLMProvider):
+        """Get or create memory evacuator instance."""
+        if self._memory_evacuator is None:
+            logger.info("Initializing MemoryEvacuator")
+            from ..services.memory_evacuator import MemoryEvacuator
+            self._memory_evacuator = MemoryEvacuator(
+                proactive_config=self.config.lt_memory.proactive,
+                api_config=self.config.api,
+                llm_provider=llm_provider
+            )
+            logger.info(
+                f"MemoryEvacuator initialized: threshold={self.config.lt_memory.proactive.evacuation_trigger_threshold}, "
+                f"target={self.config.lt_memory.proactive.evacuation_target_count}"
+            )
+        return self._memory_evacuator
+
     def _initialize_domain_knowledge_service(self, event_bus: EventBus):
         """
-        Initialize domain knowledge service with event bus.
+        Initialize domain knowledge (domaindoc) system.
 
-        The service subscribes to TurnCompletedEvent and automatically buffers
-        continuum messages to Letta domain knowledge blocks. The continuum
-        object is passed directly in the event, eliminating the need for the
-        service to fetch from the continuum pool.
+        The domaindoc system uses:
+        - SQLite storage via UserDataManager (domaindocs + domaindoc_sections tables)
+        - Section-aware editing with expand/collapse and one-level subsection nesting
+        - Gated tool pattern (domaindoc_tool appears when domains are enabled)
+        - DomaindocTrinket for content injection
+        - API endpoint for lifecycle management (create/enable/disable/delete)
+
+        No service initialization needed - state is in per-user SQLite.
         """
-        logger.info("Initializing domain knowledge service with event subscriptions")
-
-        # Initialize domain knowledge service with event bus
-        from cns.services.domain_knowledge_service import get_domain_knowledge_service
-        domain_service = get_domain_knowledge_service(event_bus=event_bus)
-
-        if domain_service:
-            logger.info("Domain knowledge service initialized and subscribed to TurnCompletedEvent")
-        else:
-            logger.info("Domain knowledge service not available (Letta API key not configured)")
+        logger.info("Domaindoc system uses SQLite storage (no service initialization needed)")
 
     def _initialize_segment_collapse_handler(self, event_bus: EventBus):
         """
@@ -341,7 +368,23 @@ class CNSIntegrationFactory:
             lt_memory_factory=lt_memory_factory
         )
 
+        # Store singleton for API access
+        from ..services.segment_collapse_handler import initialize_segment_collapse_handler
+        initialize_segment_collapse_handler(collapse_handler)
+
         logger.info("Segment collapse handler initialized and subscribed to SegmentTimeoutEvent")
+
+    def _initialize_userdata_cleanup_handler(self, event_bus: EventBus):
+        """
+        Initialize UserDataManager cleanup handler with event bus.
+
+        The handler subscribes to SegmentCollapsedEvent and closes the user's
+        SQLite connection when their session collapses, freeing resources.
+        """
+        from utils.userdata_manager import UserDataManagerCleanupHandler
+
+        self._userdata_cleanup_handler = UserDataManagerCleanupHandler(event_bus)
+        logger.info("UserDataManager cleanup handler initialized")
 
     def _initialize_manifest_query_service(self, event_bus: EventBus):
         """

@@ -11,7 +11,7 @@ import pytest
 from datetime import datetime, timedelta
 from uuid import uuid4
 
-from tools.implementations.continuumsearch_tool import ContinuumSearchTool
+from tools.implementations.continuum_tool import ContinuumSearchTool
 from cns.infrastructure.continuum_repository import get_continuum_repository
 from cns.core.message import Message
 from cns.services.segment_helpers import (
@@ -32,8 +32,8 @@ class TestContinuumSearchToolContract:
 
     def test_tool_name_and_schema(self, search_tool):
         """Verify tool name matches schema name."""
-        assert search_tool.name == "continuumsearch_tool"
-        assert search_tool.anthropic_schema["name"] == "continuumsearch_tool"
+        assert search_tool.name == "continuum_tool"
+        assert search_tool.anthropic_schema["name"] == "continuum_tool"
 
     def test_unknown_operation_raises_valueerror(self, search_tool, authenticated_user):
         """CONTRACT E1: Unknown operation raises ValueError with specific pattern."""
@@ -1282,21 +1282,21 @@ class TestArchitecturalConstraints:
 
     def test_tool_extends_base_class(self):
         """CONTRACT A2: Tool extends Tool base class."""
-        from tools.implementations.continuumsearch_tool import ContinuumSearchTool
+        from tools.implementations.continuum_tool import ContinuumSearchTool
         from tools.repo import Tool
 
         assert issubclass(ContinuumSearchTool, Tool)
 
     def test_configuration_pydantic(self):
         """CONTRACT A3: Configuration via Pydantic BaseModel."""
-        from tools.implementations.continuumsearch_tool import ContinuumSearchToolConfig
+        from tools.implementations.continuum_tool import ContinuumSearchToolConfig
         from pydantic import BaseModel
 
         assert issubclass(ContinuumSearchToolConfig, BaseModel)
 
     def test_anthropic_schema_matches_operations(self):
         """CONTRACT A5: Anthropic schema matches implementation."""
-        from tools.implementations.continuumsearch_tool import ContinuumSearchTool
+        from tools.implementations.continuum_tool import ContinuumSearchTool
 
         tool = ContinuumSearchTool()
         schema = tool.anthropic_schema
@@ -1311,7 +1311,7 @@ class TestArchitecturalConstraints:
         """CONTRACT A7: No print statements, only logging."""
         import ast
 
-        file_path = "/Users/taylut/Programming/GitHub/botwithmemory/tools/implementations/continuumsearch_tool.py"
+        file_path = "/Users/taylut/Programming/GitHub/botwithmemory/tools/implementations/continuum_tool.py"
         with open(file_path, 'r') as f:
             tree = ast.parse(f.read())
 
@@ -1323,7 +1323,7 @@ class TestArchitecturalConstraints:
 
     def test_error_messages_actionable(self):
         """CONTRACT A9: Error messages describe problem + recovery."""
-        from tools.implementations.continuumsearch_tool import ContinuumSearchTool
+        from tools.implementations.continuum_tool import ContinuumSearchTool
 
         tool = ContinuumSearchTool()
         set_current_user_id("test-user")

@@ -24,7 +24,6 @@ cryptography      # Encryption utilities - credential_security.py, userdata_mana
 # == AI & MACHINE LEARNING ==
 anthropic        # Anthropic Claude API SDK - primary LLM provider with prompt caching
 openai           # OpenAI API client - tools, embeddings (fallback for some tools)
-letta-client     # Letta Python SDK - domain knowledge blocks via Letta API
 numpy            # Numerical computing - embeddings, vector operations, ML utilities
 torch            # PyTorch (CPU-only via index above) - sentence_transformers.py, bge_embeddings.py
 transformers     # Hugging Face transformers - embeddings, BGE models
@@ -45,13 +44,15 @@ apscheduler      # Task scheduling - memory_extraction_service.py, auth_service.
 httpx[http2]     # Modern HTTP client with HTTP/2 support - tools, LLM provider, embeddings, weather/web tools
 aiohttp          # Async HTTP - kasa_tool.py for smart home control
 mcp              # Model Context Protocol SDK - mcp_client.py for MCP server connections
-playwright       # Headless browser for JavaScript-rendered webpages - web_tool.py
 
 # == TOOL-SPECIFIC LIBRARIES ==
 googlemaps       # Google Maps API - maps_tool.py
 kasa             # TP-Link Kasa smart devices - kasa_tool.py
 kagiapi          # Kagi search API - webaccess tools
 hvac             # HashiCorp Vault client - vault_client.py
+
+# == IMAGE PROCESSING ==
+Pillow>=10.0.0   # Image compression - two-tier compression for multimodal messages
 
 # == UTILITIES & HELPERS ==
 pydantic         # Data validation - widely used across API models and tools
@@ -67,7 +68,18 @@ psutil           # Process management - playwright_service.py for forced browser
 pytest           # Test framework - extensive test suite
 pytest-asyncio   # Async test support - async tests
 
+# == OPTIONAL DEPENDENCIES ==
+# These packages enhance functionality but are not required for core operation
+# Install with: pip install python-docx openpyxl playwright
+
+# Document processing - enables richer DOCX/XLSX text extraction
+# Falls back to stdlib XML parsing if not installed
+python-docx      # (optional) DOCX text extraction - document_processing.py
+openpyxl         # (optional) XLSX text extraction - document_processing.py
+
+# Web scraping - enables JavaScript-rendered page capture
+playwright       # (optional) Headless browser - web_tool.py
+
 # == PACKAGES TO REVIEW/CONSIDER REMOVING ==
 # These packages have limited usage and may be removable:
-# - sqlalchemy (only used in backfill scripts)
 # - pytz (could potentially use zoneinfo from Python 3.9+ instead)

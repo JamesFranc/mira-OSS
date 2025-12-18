@@ -155,8 +155,8 @@ class TestPostgresClientRLSContextManagement:
         user1_id = authenticated_user["user_id"]
 
         # Create second user
-        from auth.database import AuthDatabase
-        auth_db = AuthDatabase()
+        # Removed for OSS: from auth.database import AuthDatabase
+        auth_db = # Removed for OSS: AuthDatabase()
         user2_email = f"test_user_2_{uuid.uuid4()}@example.com"
         user2_id = auth_db.create_user(user2_email, "password123", None, None)
 

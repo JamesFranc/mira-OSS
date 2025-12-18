@@ -15,7 +15,7 @@ from cns.core.state import ContinuumState
 from cns.core.message import Message
 from cns.core.events import ContinuumEvent
 from clients.postgres_client import PostgresClient
-from utils.timezone_utils import utc_now, format_utc_iso
+from utils.timezone_utils import utc_now, format_utc_iso, parse_utc_time_string
 
 logger = logging.getLogger(__name__)
 
@@ -288,75 +288,62 @@ class ContinuumRepository:
         active_segments = db.execute_query(active_segment_query, (continuum_id,))
 
         if not active_segments:
-            # No active segment - check if we have enough real messages to create one
-            # Count existing real messages (excluding boundaries, system notifications)
-            real_message_count_query = """
-                SELECT COUNT(*) FROM messages
-                WHERE continuum_id = %s
-                    AND (metadata->>'is_segment_boundary' IS NULL OR metadata->>'is_segment_boundary' = 'false')
-                    AND (metadata->>'system_notification' IS NULL OR metadata->>'system_notification' = 'false')
-            """
-            count_row = db.execute_query(real_message_count_query, (continuum_id,))
-            existing_count = count_row[0]['count'] if count_row else 0
+            # No active segment - create one for this segment's first message
+            # This ensures segment exists from turn 1, enabling proper turn counting
 
-            # We're about to save 1 message, so if existing_count >= 1, we'll have 2+ after this save
-            if existing_count >= 1:
-                # Find the most recent collapsed segment to determine time boundary
-                last_segment_query = """
-                    SELECT metadata->>'segment_end_time' as segment_end_time
-                    FROM messages
+            # Find the most recent collapsed segment to determine time boundary
+            last_segment_query = """
+                SELECT metadata->>'segment_end_time' as segment_end_time
+                FROM messages
+                WHERE continuum_id = %s
+                    AND metadata->>'is_segment_boundary' = 'true'
+                    AND metadata->>'status' = 'collapsed'
+                ORDER BY created_at DESC
+                LIMIT 1
+            """
+            last_segment_row = db.execute_query(last_segment_query, (continuum_id,))
+
+            # If there's a previous collapsed segment, only look at messages after it ended
+            if last_segment_row and last_segment_row[0].get('segment_end_time'):
+                last_segment_end = parse_utc_time_string(last_segment_row[0]['segment_end_time'])
+
+                first_message_query = """
+                    SELECT created_at FROM messages
                     WHERE continuum_id = %s
-                        AND metadata->>'is_segment_boundary' = 'true'
-                        AND metadata->>'status' = 'collapsed'
-                    ORDER BY created_at DESC
+                        AND created_at > %s
+                        AND (metadata->>'is_segment_boundary' IS NULL OR metadata->>'is_segment_boundary' = 'false')
+                        AND (metadata->>'system_notification' IS NULL OR metadata->>'system_notification' = 'false')
+                    ORDER BY created_at ASC
                     LIMIT 1
                 """
-                last_segment_row = db.execute_query(last_segment_query, (continuum_id,))
+                first_msg_row = db.execute_query(first_message_query, (continuum_id, last_segment_end))
+            else:
+                # No previous collapsed segment - this may be the absolute first message
+                first_message_query = """
+                    SELECT created_at FROM messages
+                    WHERE continuum_id = %s
+                        AND (metadata->>'is_segment_boundary' IS NULL OR metadata->>'is_segment_boundary' = 'false')
+                        AND (metadata->>'system_notification' IS NULL OR metadata->>'system_notification' = 'false')
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                """
+                first_msg_row = db.execute_query(first_message_query, (continuum_id,))
 
-                # If there's a previous collapsed segment, only look at messages after it ended
-                if last_segment_row and last_segment_row[0].get('segment_end_time'):
-                    from datetime import datetime
-                    last_segment_end = datetime.fromisoformat(last_segment_row[0]['segment_end_time'])
+            # Use first existing message time, or current message time if this IS the first message
+            first_message_time = first_msg_row[0]['created_at'] if first_msg_row else current_message_time
 
-                    first_message_query = """
-                        SELECT created_at FROM messages
-                        WHERE continuum_id = %s
-                            AND created_at > %s
-                            AND (metadata->>'is_segment_boundary' IS NULL OR metadata->>'is_segment_boundary' = 'false')
-                            AND (metadata->>'system_notification' IS NULL OR metadata->>'system_notification' = 'false')
-                        ORDER BY created_at ASC
-                        LIMIT 1
-                    """
-                    first_msg_row = db.execute_query(first_message_query, (continuum_id, last_segment_end))
-                else:
-                    # No previous collapsed segment - use absolute first message
-                    first_message_query = """
-                        SELECT created_at FROM messages
-                        WHERE continuum_id = %s
-                            AND (metadata->>'is_segment_boundary' IS NULL OR metadata->>'is_segment_boundary' = 'false')
-                            AND (metadata->>'system_notification' IS NULL OR metadata->>'system_notification' = 'false')
-                        ORDER BY created_at ASC
-                        LIMIT 1
-                    """
-                    first_msg_row = db.execute_query(first_message_query, (continuum_id,))
+            # Create segment boundary sentinel (initializes segment_turn_count to 1)
+            from cns.services.segment_helpers import create_segment_boundary_sentinel
 
-                first_message_time = first_msg_row[0]['created_at'] if first_msg_row else current_message_time
+            sentinel = create_segment_boundary_sentinel(
+                first_message_time=first_message_time,
+                continuum_id=str(continuum_id)
+            )
 
-                # Create segment boundary sentinel
-                from cns.services.segment_helpers import create_segment_boundary_sentinel
+            # Save sentinel (recursive call, but sentinel has is_segment_boundary=True so won't recurse into _ensure_active_segment)
+            self.save_message(sentinel, continuum_id, user_id)
 
-                sentinel = create_segment_boundary_sentinel(
-                    first_message_time=first_message_time,
-                    continuum_id=str(continuum_id)
-                )
-
-                # Save sentinel (recursive call, but sentinel has is_segment_boundary=True so won't recurse into _ensure_active_segment)
-                self.save_message(sentinel, continuum_id, user_id)
-
-                logger.info(
-                    f"Created segment boundary sentinel for continuum {continuum_id} "
-                    f"(now has {existing_count + 1} messages)"
-                )
+            logger.info(f"Created segment boundary sentinel for continuum {continuum_id}")
     
     def save_messages_batch(self, messages: List[Message], continuum_id: Union[str, UUID], user_id: str) -> None:
         """
@@ -780,16 +767,16 @@ class ContinuumRepository:
         Returns:
             Dictionary mapping dates to their messages
         """
-        from datetime import datetime
-        
+        from datetime import datetime, time, timezone
+
         db = self._get_client(user_id)
         messages_by_date = {}
-        
+
         for date_str in dates:
-            # Parse date and create date range for SQL query (same as temporal_context.py)
+            # Parse date and create UTC-aware date range for SQL query
             target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-            start_datetime = datetime.combine(target_date, datetime.min.time())
-            end_datetime = datetime.combine(target_date, datetime.max.time())
+            start_datetime = datetime.combine(target_date, time.min, tzinfo=timezone.utc)
+            end_datetime = datetime.combine(target_date, time.max, tzinfo=timezone.utc)
             
             query = """
                 SELECT id, role, content, created_at, metadata
@@ -866,6 +853,47 @@ class ContinuumRepository:
         messages = self._parse_message_rows(rows)
 
         return messages[0] if messages else None
+
+    def increment_segment_turn(self, continuum_id: Union[str, UUID], user_id: str) -> int:
+        """
+        Increment segment turn counter on the active segment sentinel.
+
+        Called at API entry point when a real user message arrives.
+        This is the authoritative source for segment turn count.
+
+        Args:
+            continuum_id: Continuum ID
+            user_id: User ID
+
+        Returns:
+            New turn number (1-indexed). Returns 1 if no active segment exists yet
+            (segment will be created when message is saved).
+        """
+        db = self._get_client(user_id)
+
+        # Atomically increment and return the new value
+        query = """
+            UPDATE messages
+            SET metadata = jsonb_set(
+                metadata,
+                '{segment_turn_count}',
+                to_jsonb((metadata->>'segment_turn_count')::int + 1)
+            )
+            WHERE continuum_id = %s
+                AND metadata->>'is_segment_boundary' = 'true'
+                AND metadata->>'status' = 'active'
+            RETURNING (metadata->>'segment_turn_count')::int as turn_count
+        """
+
+        rows = db.execute_query(query, (str(continuum_id),))
+
+        if rows and rows[0].get('turn_count'):
+            return rows[0]['turn_count']
+
+        # First message in a new segment: no active segment exists yet.
+        # Return 1 now - the segment will be created with turn_count=1 inside
+        # save_message() later in this request. The values align.
+        return 1
 
     def find_collapsed_segments(
         self,

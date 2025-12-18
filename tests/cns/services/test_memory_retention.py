@@ -7,37 +7,36 @@ import pytest
 
 
 class TestRetentionApplication:
-    """Tests for _apply_retention() - filtering memories by retained texts."""
+    """Tests for _apply_retention() - filtering memories by 8-char ID match."""
 
-    def test_applies_retention_by_text_match(self):
-        """CONTRACT: Filters memories keeping only those whose text is in retained_texts."""
+    def test_applies_retention_by_id_match(self):
+        """CONTRACT: Filters memories keeping only those whose 8-char ID is in pinned_ids."""
         from cns.services.orchestrator import ContinuumOrchestrator
 
         previous_memories = [
-            {"id": "1", "text": "Taylor prefers PgBouncer"},
-            {"id": "2", "text": "Taylor's birthday is March 15"},
-            {"id": "3", "text": "Production DB on port 5433"},
+            {"id": "550e8400-e29b-41d4-a716-446655440001", "text": "Taylor prefers PgBouncer"},
+            {"id": "660e8400-e29b-41d4-a716-446655440002", "text": "Taylor's birthday is March 15"},
+            {"id": "770e8400-e29b-41d4-a716-446655440003", "text": "Production DB on port 5433"},
         ]
 
-        retained_texts = {"Taylor prefers PgBouncer", "Production DB on port 5433"}
+        pinned_ids = {"550e8400", "770e8400"}
 
         pinned = ContinuumOrchestrator._apply_retention(
-            None, previous_memories, retained_texts
+            None, previous_memories, pinned_ids
         )
 
         assert len(pinned) == 2
-        assert all(m['text'] in retained_texts for m in pinned)
-        assert any(m['id'] == "1" for m in pinned)
-        assert any(m['id'] == "3" for m in pinned)
-        assert not any(m['id'] == "2" for m in pinned)
+        assert any("550e8400" in m['id'] for m in pinned)
+        assert any("770e8400" in m['id'] for m in pinned)
+        assert not any("660e8400" in m['id'] for m in pinned)
 
-    def test_returns_empty_list_when_no_retained_texts(self):
-        """CONTRACT: Empty retained_texts set means nothing is pinned."""
+    def test_returns_empty_list_when_no_pinned_ids(self):
+        """CONTRACT: Empty pinned_ids set means nothing is pinned."""
         from cns.services.orchestrator import ContinuumOrchestrator
 
         previous_memories = [
-            {"id": "1", "text": "Memory A"},
-            {"id": "2", "text": "Memory B"},
+            {"id": "550e8400-e29b-41d4-a716-446655440001", "text": "Memory A"},
+            {"id": "660e8400-e29b-41d4-a716-446655440002", "text": "Memory B"},
         ]
 
         pinned = ContinuumOrchestrator._apply_retention(
@@ -50,56 +49,54 @@ class TestRetentionApplication:
         """CONTRACT: No previous memories means nothing to pin."""
         from cns.services.orchestrator import ContinuumOrchestrator
 
-        retained_texts = {"Some text"}
+        pinned_ids = {"550e8400"}
 
         pinned = ContinuumOrchestrator._apply_retention(
-            None, [], retained_texts
+            None, [], pinned_ids
         )
 
         assert pinned == []
 
         pinned = ContinuumOrchestrator._apply_retention(
-            None, None, retained_texts
+            None, None, pinned_ids
         )
 
         assert pinned == []
 
-    def test_requires_exact_text_match(self):
-        """CONTRACT: Only exact text matches count - partial matches don't retain."""
+    def test_id_matching_is_case_insensitive(self):
+        """CONTRACT: ID matching works regardless of case."""
         from cns.services.orchestrator import ContinuumOrchestrator
 
         previous_memories = [
-            {"id": "1", "text": "Taylor prefers PgBouncer over built-in pooling"},
+            {"id": "550E8400-e29b-41d4-a716-446655440001", "text": "Memory"},
         ]
 
-        # Partial match - should not retain
-        retained_texts = {"Taylor prefers PgBouncer"}
+        pinned_ids = {"550e8400"}  # lowercase
 
         pinned = ContinuumOrchestrator._apply_retention(
-            None, previous_memories, retained_texts
+            None, previous_memories, pinned_ids
         )
 
-        assert pinned == []
-
-    def test_handles_memories_with_empty_text(self):
-        """CONTRACT: Memories with empty or missing text are not retained."""
-        from cns.services.orchestrator import ContinuumOrchestrator
-
-        previous_memories = [
-            {"id": "1", "text": "Valid memory"},
-            {"id": "2", "text": ""},
-            {"id": "3"},  # No text key
-        ]
-
-        retained_texts = {"Valid memory", ""}
-
-        pinned = ContinuumOrchestrator._apply_retention(
-            None, previous_memories, retained_texts
-        )
-
-        # Only the valid memory should be retained
         assert len(pinned) == 1
-        assert pinned[0]['id'] == "1"
+
+    def test_handles_memories_with_missing_id(self):
+        """CONTRACT: Memories without ID are not retained."""
+        from cns.services.orchestrator import ContinuumOrchestrator
+
+        previous_memories = [
+            {"id": "550e8400-e29b-41d4-a716-446655440001", "text": "Valid memory"},
+            {"id": "", "text": "Empty ID"},
+            {"text": "No ID key"},
+        ]
+
+        pinned_ids = {"550e8400", ""}
+
+        pinned = ContinuumOrchestrator._apply_retention(
+            None, previous_memories, pinned_ids
+        )
+
+        assert len(pinned) == 1
+        assert "550e8400" in pinned[0]['id']
 
     def test_preserves_full_memory_dict(self):
         """CONTRACT: Retained memories keep all their original fields."""
@@ -107,7 +104,7 @@ class TestRetentionApplication:
 
         previous_memories = [
             {
-                "id": "1",
+                "id": "550e8400-e29b-41d4-a716-446655440001",
                 "text": "Memory text",
                 "importance_score": 0.85,
                 "created_at": "2024-01-01T00:00:00",
@@ -115,10 +112,10 @@ class TestRetentionApplication:
             },
         ]
 
-        retained_texts = {"Memory text"}
+        pinned_ids = {"550e8400"}
 
         pinned = ContinuumOrchestrator._apply_retention(
-            None, previous_memories, retained_texts
+            None, previous_memories, pinned_ids
         )
 
         assert len(pinned) == 1
@@ -169,10 +166,8 @@ class TestMemoryMerging:
 
         merged = ContinuumOrchestrator._merge_memories(None, pinned, fresh)
 
-        # Only 2 total - duplicate removed
         assert len(merged) == 2
 
-        # The pinned version is kept, not fresh
         dup_memory = next(m for m in merged if m['id'] == duplicate_id)
         assert dup_memory['source'] == "pinned"
 
@@ -189,7 +184,6 @@ class TestMemoryMerging:
 
         merged = ContinuumOrchestrator._merge_memories(None, pinned, fresh)
 
-        # Fresh IDs should be in positions after pinned
         assert merged[1]['id'] == "fresh-1"
         assert merged[2]['id'] == "fresh-2"
 
@@ -233,16 +227,15 @@ class TestMemoryMerging:
         """CONTRACT: Fresh memories without ID are not added (require ID for dedup tracking)."""
         from cns.services.orchestrator import ContinuumOrchestrator
 
-        pinned = [{"text": "Pinned no ID"}]  # Pinned always included
+        pinned = [{"text": "Pinned no ID"}]
 
         fresh = [
-            {"text": "Fresh no ID"},  # Skipped - no ID
-            {"id": "fresh-1", "text": "Fresh with ID"},  # Added
+            {"text": "Fresh no ID"},
+            {"id": "fresh-1", "text": "Fresh with ID"},
         ]
 
         merged = ContinuumOrchestrator._merge_memories(None, pinned, fresh)
 
-        # Only 2: pinned (always included) + fresh with ID
         assert len(merged) == 2
         assert merged[0]['text'] == "Pinned no ID"
         assert merged[1]['id'] == "fresh-1"
@@ -286,21 +279,18 @@ class TestMergeOrderingWithDuplicates:
         ]
 
         fresh = [
-            {"id": "a", "text": "A fresh"},  # duplicate
+            {"id": "a", "text": "A fresh"},
             {"id": "c", "text": "C"},
-            {"id": "b", "text": "B fresh"},  # duplicate
+            {"id": "b", "text": "B fresh"},
             {"id": "d", "text": "D"},
         ]
 
         merged = ContinuumOrchestrator._merge_memories(None, pinned, fresh)
 
-        # 4 total: 2 pinned + 2 unique fresh
         assert len(merged) == 4
 
-        # Order: pinned first (a, b), then fresh unique (c, d)
         ids = [m['id'] for m in merged]
         assert ids == ["a", "b", "c", "d"]
 
-        # Pinned versions kept
-        assert merged[0]['text'] == "A"  # pinned, not "A fresh"
-        assert merged[1]['text'] == "B"  # pinned, not "B fresh"
+        assert merged[0]['text'] == "A"
+        assert merged[1]['text'] == "B"

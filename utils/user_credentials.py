@@ -83,7 +83,7 @@ class UserCredentialService:
             {'ctype': credential_type, 'service': service_name}
         )
 
-        return results[0]['credential_value'] if results else None
+        return results[0]['encrypted__credential_value'] if results else None
     
     def delete_credential(
         self,

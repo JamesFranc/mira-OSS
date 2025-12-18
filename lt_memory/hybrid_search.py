@@ -8,6 +8,7 @@ Also provides query-time entity priming: when entities are mentioned in the quer
 memories linked to those entities receive a relevance boost.
 """
 import logging
+import math
 from typing import List, Tuple, Dict, Any, Optional
 from uuid import UUID
 from collections import defaultdict
@@ -213,14 +214,18 @@ class HybridSearcher:
         limit: int
     ) -> List[Any]:
         """
-        Combine results using Reciprocal Rank Fusion (RRF).
+        Combine results using Reciprocal Rank Fusion (RRF) with sigmoid normalization.
 
         RRF formula: score(d) = Σ(1 / (k + rank(d)))
         where k is a constant (typically 60) that determines how quickly scores decay.
+
+        Raw RRF scores are compressed into ~0.007-0.016 range which provides poor
+        discrimination. We apply sigmoid transformation to spread scores into
+        a useful 0-1 range for meaningful thresholding and interpretability.
         """
         k = 60  # RRF constant
 
-        # Calculate RRF scores
+        # Calculate raw RRF scores
         rrf_scores = defaultdict(float)
         memory_map = {}
 
@@ -230,21 +235,31 @@ class HybridSearcher:
             rrf_scores[memory_id] += bm25_weight * (1.0 / (k + rank))
             memory_map[memory_id] = memory
 
-        # Process vector results
-        for rank, (memory, _) in enumerate(vector_results, 1):
+        # Process vector results - preserve original cosine similarity
+        for rank, (memory, cosine_sim) in enumerate(vector_results, 1):
             memory_id = str(memory.id)
             rrf_scores[memory_id] += vector_weight * (1.0 / (k + rank))
+            memory._vector_similarity = cosine_sim  # Preserve for logging
             memory_map[memory_id] = memory
 
         # Sort by combined RRF score
         sorted_ids = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
 
-        # Return top memories with RRF scores preserved for potential boosting
+        # Apply sigmoid transformation to spread scores into useful 0-1 range
+        # Raw RRF scores cluster around 0.007-0.016; sigmoid with k=1000 and
+        # midpoint=0.009 spreads this to ~0.1-0.85 for meaningful discrimination
+        def sigmoid_normalize(raw_score: float) -> float:
+            # Sigmoid: 1 / (1 + exp(-k * (x - midpoint)))
+            # k=1000 provides good spread, midpoint=0.009 centers on typical RRF range
+            return 1.0 / (1.0 + math.exp(-1000 * (raw_score - 0.009)))
+
+        # Return top memories with normalized scores
         results = []
-        for memory_id, rrf_score in sorted_ids[:limit]:
+        for memory_id, raw_rrf_score in sorted_ids[:limit]:
             memory = memory_map[memory_id]
-            # Store RRF score in similarity_score for entity boosting
-            memory.similarity_score = rrf_score
+            # Store sigmoid-normalized score for interpretable thresholding
+            memory.similarity_score = sigmoid_normalize(raw_rrf_score)
+            memory._raw_rrf_score = raw_rrf_score  # Preserve raw for debugging
             results.append(memory)
         return results
 

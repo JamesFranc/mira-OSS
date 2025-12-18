@@ -26,6 +26,17 @@ def get_config():
     return config
 
 
+# Anthropic beta feature constants
+CODE_EXECUTION_BETA_FLAG = "code-execution-2025-08-25"
+FILES_API_BETA_FLAG = "files-api-2025-04-14"
+
+# Code execution tool definition
+CODE_EXECUTION = {"type": "code_execution_20250825", "name": "code_execution"}
+
+# Combined beta flags for Anthropic API calls
+ANTHROPIC_BETA_FLAGS = [CODE_EXECUTION_BETA_FLAG, FILES_API_BETA_FLAG]
+
+
 class Tool(ABC):
     """
     Base class for all tools in the botwithmemory system.
@@ -233,6 +244,7 @@ class ToolRepository:
     Attributes:
         tool_classes (Dict[str, Type[Tool]]): Dictionary mapping tool names to tool classes.
         enabled_tools (Set[str]): Set of names of currently enabled tools.
+        gated_tools (Set[str]): Set of gated tools that self-determine availability via is_available().
         working_memory (Optional[WorkingMemory]): WorkingMemory instance for publishing tool updates.
     """
 
@@ -240,6 +252,7 @@ class ToolRepository:
         self.logger = logging.getLogger("tool_repository")
         self.tool_classes: Dict[str, Type[Tool]] = {}  # Store tool classes for lazy instantiation
         self.enabled_tools: Set[str] = set()
+        self.gated_tools: Set[str] = set()  # Tools that self-determine availability
         self.working_memory = working_memory
         config = get_config()
         self.tool_list_path: str = os.path.join(config.paths.data_dir, "tools", "tool_list.json")
@@ -264,12 +277,35 @@ class ToolRepository:
         
         self._update_tool_list_file()
         self._update_tool_guidance()
-    
+
+    def register_gated_tool(self, tool_name: str) -> None:
+        """
+        Register a tool as gated - it self-determines availability via is_available().
+
+        Gated tools automatically appear/disappear from the tool list based on their
+        internal state (e.g., manifest file, user preferences). Unlike enabled_tools,
+        gated tools don't require explicit enable/disable calls.
+
+        Args:
+            tool_name: Name of the tool to register as gated
+
+        Raises:
+            KeyError: If the tool class hasn't been registered yet
+        """
+        if tool_name not in self.tool_classes:
+            raise KeyError(f"Tool '{tool_name}' must be registered before marking as gated")
+        self.gated_tools.add(tool_name)
+        self.logger.info(f"Registered gated tool: {tool_name}")
+
     def enable_tool(self, name: str) -> None:
         if name not in self.tool_classes:
             self.logger.error(f"Cannot enable tool '{name}': Tool not found")
             raise KeyError(f"Cannot enable tool '{name}': Tool not found")
-        
+
+        # Gated tools use is_available(), not enable_tool()
+        if name in self.gated_tools:
+            raise ValueError(f"Cannot enable gated tool '{name}' - availability controlled by is_available()")
+
         # Auto-enable dependencies recursively
         dependencies = self.resolve_dependencies(name)
         for dep_name in dependencies:
@@ -356,9 +392,18 @@ class ToolRepository:
             self.logger.error(f"Cannot invoke tool '{name}': Tool not found")
             raise KeyError(f"Cannot invoke tool '{name}': Tool not found")
 
+        # Check if tool is invocable: either explicitly enabled OR a gated tool that's available
         if name not in self.enabled_tools:
-            self.logger.error(f"Cannot invoke tool '{name}': Tool is not enabled")
-            raise RuntimeError(f"Cannot invoke tool '{name}': Tool is not enabled")
+            if name in self.gated_tools:
+                # Gated tool - check is_available() at invocation time
+                tool = self.get_tool(name)
+                if not (hasattr(tool, 'is_available') and tool.is_available()):
+                    self.logger.error(f"Cannot invoke gated tool '{name}': Tool is not available")
+                    raise RuntimeError(f"Cannot invoke gated tool '{name}': Tool is not available")
+                # Gated tool is available - allow invocation to proceed
+            else:
+                self.logger.error(f"Cannot invoke tool '{name}': Tool is not enabled")
+                raise RuntimeError(f"Cannot invoke tool '{name}': Tool is not enabled")
 
         if isinstance(params, str):
             try:
@@ -436,10 +481,17 @@ class ToolRepository:
         else:
             self.logger.warning(f"Tool '{name}' does not have an anthropic_schema attribute")
             return None
-    
+
     def get_all_tool_definitions(self) -> List[Dict[str, Any]]:
+        """
+        Get tool schemas for LLM context - only enabled and available tools.
+
+        invokeother_tool pattern: Essential tools are always enabled. Other tools
+        loaded on-demand when needed, managed by ToolLoaderTrinket and invokeother_tool.
+        """
         definitions = []
 
+        # Standard enabled tools (explicit enable/disable)
         for name in self.enabled_tools:
             tool = self.get_tool(name)
             if hasattr(tool, 'anthropic_schema'):
@@ -447,8 +499,26 @@ class ToolRepository:
             else:
                 self.logger.warning(f"Tool '{name}' does not have an anthropic_schema attribute")
 
+        # Gated tools - check is_available() at runtime
+        for name in self.gated_tools:
+            try:
+                tool = self.get_tool(name)
+                if hasattr(tool, 'is_available') and tool.is_available():
+                    if hasattr(tool, 'anthropic_schema'):
+                        definitions.append(tool.anthropic_schema)
+                        self.logger.debug(f"Gated tool '{name}' is available")
+                    else:
+                        self.logger.warning(f"Gated tool '{name}' has no anthropic_schema")
+            except Exception as e:
+                # Gated tool check failures should not break the tool list
+                self.logger.warning(f"Error checking gated tool '{name}': {e}")
+
+        # Add code_execution tool - always available since we send the beta flag
+        # This is a server-side tool that runs in Anthropic's sandbox
+        definitions.insert(0, CODE_EXECUTION.copy())
+
         return definitions
-    
+
     def resolve_dependencies(self, tool_name: str) -> List[str]:
         from utils.user_context import has_user_context
 
@@ -525,7 +595,7 @@ class ToolRepository:
                 self.register_tool_class(attr, attr.name)
     
     def enable_tools_from_config(self) -> None:
-        """Enable only essential tools at startup. Other tools loaded on-demand via invokeother_tool."""
+        """Enable essential tools at startup. Other tools loaded on-demand via invokeother_tool."""
         config = get_config()
         essential_tools = config.tools.essential_tools
 

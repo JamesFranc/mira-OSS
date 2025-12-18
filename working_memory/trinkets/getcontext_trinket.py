@@ -119,62 +119,68 @@ class GetContextTrinket(EventAwareTrinket):
                 if self.current_turn <= result.get('display_until_turn', 0):
                     parts.append(self._format_error_result(result))
 
-        # Join with clear separator
+        # Wrap in XML structure
         if parts:
-            return "=== RECENT GET_CONTEXT TOOL SEARCH RESULTS ===\n\n" + "\n\n---\n\n".join(parts)
+            return "<context_search_results>\n" + "\n".join(parts) + "\n</context_search_results>"
 
         return ""
 
     def _format_success_result(self, summary: Dict[str, Any]) -> str:
-        """Format successful search results."""
-        header = f"📎 Context Search: {summary.get('query', 'Unknown query')}"
+        """Format successful search results as XML."""
+        query = summary.get('query', 'Unknown query')
+        parts = [f'<result type="success" query="{query}">']
 
-        # Get the summary content
+        # Summary content
         summary_text = summary.get('summary', '')
-
-        # Format key findings
-        findings = []
-        for finding in summary.get('key_findings', []):
-            finding_text = f"• {finding.get('point', '')}"
-            if finding.get('source'):
-                finding_text += f" (source: {finding['source']})"
-            findings.append(finding_text)
-
-        # Combine parts
-        parts = [header]
         if summary_text:
-            parts.append(summary_text)
-        if findings:
-            parts.append("\n" + "\n".join(findings))
-        if summary.get('limitations'):
-            parts.append(f"\nNote: {summary['limitations']}")
+            parts.append(f"<summary>{summary_text}</summary>")
 
-        return "\n\n".join(parts)
+        # Key findings
+        key_findings = summary.get('key_findings', [])
+        if key_findings:
+            parts.append("<findings>")
+            for finding in key_findings:
+                point = finding.get('point', '')
+                source = finding.get('source', '')
+                if source:
+                    parts.append(f'<finding source="{source}">{point}</finding>')
+                else:
+                    parts.append(f"<finding>{point}</finding>")
+            parts.append("</findings>")
+
+        # Limitations
+        if summary.get('limitations'):
+            parts.append(f"<limitations>{summary['limitations']}</limitations>")
+
+        parts.append("</result>")
+        return "\n".join(parts)
 
     def _format_error_result(self, result: Dict[str, Any]) -> str:
-        """Format error result with remaining display time."""
+        """Format error result as XML with remaining display time."""
         data = result['data']
         result_type = result['type']
         turns_remaining = result['display_until_turn'] - self.current_turn
 
         if result_type == 'timeout':
             return (
-                f"⚠️ Context search timed out: '{data['query']}'\n\n"
-                f"The search exceeded 5 minutes (stopped at iteration {data['iteration']} "
-                f"with {data['findings_count']} findings). "
-                f"Try rephrasing your query or tell the user the search was inconclusive.\n\n"
-                f"(This message will disappear in {turns_remaining} turn{'s' if turns_remaining != 1 else ''})"
+                f'<result type="timeout" query="{data["query"]}" turns_remaining="{turns_remaining}">\n'
+                f"<warning>⚠️ Context search timed out</warning>\n"
+                f"<details>The search exceeded 5 minutes (stopped at iteration {data['iteration']} "
+                f"with {data['findings_count']} findings).</details>\n"
+                f"<guidance>Try rephrasing your query or tell the user the search was inconclusive.</guidance>\n"
+                f"</result>"
             )
         else:  # failed
             return (
-                f"⚠️ Context search failed: '{data['query']}'\n\n"
-                f"Error: {data['error']} ({data['error_type']})\n\n"
-                f"Try rephrasing the query or tell the user you encountered an error.\n\n"
-                f"(This message will disappear in {turns_remaining} turn{'s' if turns_remaining != 1 else ''})"
+                f'<result type="failed" query="{data["query"]}" turns_remaining="{turns_remaining}">\n'
+                f"<warning>⚠️ Context search failed</warning>\n"
+                f"<error type=\"{data['error_type']}\">{data['error']}</error>\n"
+                f"<guidance>Try rephrasing the query or tell the user you encountered an error.</guidance>\n"
+                f"</result>"
             )
 
     def _format_pending_result(self, data: Dict[str, Any]) -> str:
-        """Format pending/searching result."""
+        """Format pending/searching result as XML."""
         query = data.get('query', 'Unknown query')
         search_scope = data.get('search_scope', [])
         search_mode = data.get('search_mode', 'standard')
@@ -182,9 +188,9 @@ class GetContextTrinket(EventAwareTrinket):
         scope_text = ', '.join(search_scope) if search_scope else 'all sources'
 
         return (
-            f"🔍 Searching for context: '{query}'\n\n"
-            f"Mode: {search_mode} | Sources: {scope_text}\n\n"
-            f"Results will appear here when the search completes..."
+            f'<result type="pending" query="{query}" search_mode="{search_mode}" sources="{scope_text}">\n'
+            f"<status>Results will appear here when the search completes...</status>\n"
+            f"</result>"
         )
 
     def _handle_turn_completed(self, event) -> None:

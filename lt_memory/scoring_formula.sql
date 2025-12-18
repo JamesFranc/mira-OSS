@@ -13,10 +13,12 @@
 -- 5. Value score: LN(1 + access_rate / 0.02) * 0.8
 -- 6. Hub score: f(inbound_links) with diminishing returns after 10 links
 -- 7. Entity hub score: f(entity_links × entity.link_count × type_weight) with diminishing returns
--- 8. Raw score: value_score + hub_score + entity_hub_score
--- 9. Recency boost: 1.0 / (1.0 + activity_days_since_last_access * 0.03)
--- 10. Temporal multiplier: happens_at proximity boost (calendar-based)
--- 11. Sigmoid transform: 1.0 / (1.0 + EXP(-(raw_score * recency * temporal - 2.0)))
+-- 8. Mention score: f(mention_count) - explicit LLM references (strongest signal)
+-- 9. Newness boost: 2.0 decaying to 0 over 60 activity days (grace period for new memories)
+-- 10. Raw score: value_score + hub_score + entity_hub_score + mention_score + newness_boost
+-- 11. Recency boost: 1.0 / (1.0 + activity_days_since_last_access * 0.015)
+-- 12. Temporal multiplier: happens_at proximity boost (calendar-based)
+-- 13. Sigmoid transform: 1.0 / (1.0 + EXP(-(raw_score * recency * temporal - 2.0)))
 --
 -- CONSTANTS:
 -- - BASELINE_ACCESS_RATE = 0.02 (1 access per 50 activity days)
@@ -24,6 +26,10 @@
 -- - MIN_AGE_DAYS = 7 (prevents spikes for new memories)
 -- - SIGMOID_CENTER = 2.0 (maps average memories to ~0.5 importance)
 -- - EXPIRATION_TRAILOFF_DAYS = 5 (grace period after expires_at)
+-- - NEWNESS_BOOST_DECAY_DAYS = 60 (grace period for new memories)
+-- - RECENCY_DECAY_RATE = 0.015 (half-life of ~67 activity days)
+-- - TEMPORAL_DECAY_DAYS = 45 (window for past-event decay)
+-- - TEMPORAL_FLOOR = 0.4 (minimum multiplier for past events)
 -- - ENTITY_LINEAR_THRESHOLD = 50 (weighted entity links before diminishing returns)
 -- - ENTITY_TYPE_WEIGHTS: PERSON=1.0, EVENT=0.9, ORG=0.8, PRODUCT=0.7, etc.
 --
@@ -46,7 +52,7 @@ ROUND(CAST(
         WHEN m.expires_at IS NOT NULL
              AND EXTRACT(EPOCH FROM (NOW() - m.expires_at)) / 86400 > 5 THEN 0.0
         ELSE
-            -- "Earning Your Keep" scoring with activity-based decay
+            -- "Earn Your Keep" scoring: new memories start at ~0.5 and prove themselves
             1.0 / (1.0 + EXP(-(
                 -- Raw score calculation
                 (
@@ -108,22 +114,39 @@ ROUND(CAST(
                                     ) entity_weights
                                 ), 0.0)
                         END
-                    )
+                    ) +
+
+                    -- MENTION SCORE: explicit LLM references (strongest behavioral signal)
+                    (
+                        CASE
+                            WHEN m.mention_count = 0 THEN 0.0
+                            WHEN m.mention_count <= 5 THEN m.mention_count * 0.08
+                            ELSE 0.4 + LN(1 + (m.mention_count - 5)) * 0.1
+                        END
+                    ) +
+
+                    -- NEWNESS BOOST: grace period for new memories (decays over 60 activity days)
+                    -- Gives memories time to accumulate behavioral signals before being penalized
+                    GREATEST(0.0, 2.0 - (
+                        GREATEST(0, u.cumulative_activity_days - COALESCE(m.activity_days_at_creation, 0))
+                        * 0.033  -- 2.0 / 60 = 0.033, fully decays over 60 activity days
+                    ))
                 ) *
 
-                -- RECENCY BOOST: smooth transition to cold storage (activity-based)
-                (1.0 / (1.0 + GREATEST(0, u.cumulative_activity_days - COALESCE(m.activity_days_at_last_access, m.activity_days_at_creation, 0)) * 0.03)) *
+                -- RECENCY BOOST: gentle transition to cold storage (activity-based)
+                -- Half-life of ~67 activity days (was 33 days with 0.03)
+                (1.0 / (1.0 + GREATEST(0, u.cumulative_activity_days - COALESCE(m.activity_days_at_last_access, m.activity_days_at_creation, 0)) * 0.015)) *
 
                 -- TEMPORAL MULTIPLIER: happens_at proximity boost (calendar-based)
                 CASE
                     WHEN m.happens_at IS NOT NULL THEN
                         CASE
-                            -- Event has passed: 14-day gradual decay (0.8 → 0.1)
+                            -- Event has passed: 45-day gradual decay (0.8 → 0.4)
                             WHEN m.happens_at < NOW() THEN
                                 CASE
-                                    WHEN EXTRACT(EPOCH FROM (NOW() - m.happens_at)) / 86400 <= 14 THEN
-                                        0.8 * (1.0 - (EXTRACT(EPOCH FROM (NOW() - m.happens_at)) / 86400) / 14.0) + 0.1
-                                    ELSE 0.1
+                                    WHEN EXTRACT(EPOCH FROM (NOW() - m.happens_at)) / 86400 <= 45 THEN
+                                        0.4 * (1.0 - (EXTRACT(EPOCH FROM (NOW() - m.happens_at)) / 86400) / 45.0) + 0.4
+                                    ELSE 0.4
                                 END
                             -- Event upcoming: boost based on proximity
                             WHEN EXTRACT(EPOCH FROM (m.happens_at - NOW())) / 86400 <= 1 THEN 2.0

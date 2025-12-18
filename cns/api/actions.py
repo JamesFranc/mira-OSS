@@ -8,7 +8,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from enum import Enum
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field, field_validator
@@ -16,8 +16,9 @@ from pydantic import BaseModel, Field, field_validator
 from utils.user_context import get_current_user_id, set_current_user_id
 from auth.api import get_current_user
 from .base import BaseHandler, ValidationError, NotFoundError
-from tools.repo import ToolRepository
 from utils.timezone_utils import utc_now, format_utc_iso
+from clients.valkey_client import get_valkey_client
+from working_memory.trinkets.base import TRINKET_KEY_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -160,19 +161,8 @@ class ReminderDomainHandler(BaseDomainHandler):
     
     def execute_action(self, action: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """Execute reminder actions using ReminderTool."""
-        # Get reminder tool through ToolRepository
-        tool_repo = ToolRepository()
-        
-        # Discover and enable tools if not already done
-        if "reminder_tool" not in tool_repo.tools:
-            tool_repo.discover_tools("tools.implementations")
-            if "reminder_tool" in tool_repo.tools:
-                tool_repo.enable_tool("reminder_tool")
-        
-        reminder_tool = tool_repo.get_tool("reminder_tool")
-        
-        if not reminder_tool:
-            raise NotFoundError("tool", "reminder_tool")
+        from tools.implementations.reminder_tool import ReminderTool
+        reminder_tool = ReminderTool()
         
         try:
             if action == "complete":
@@ -181,6 +171,7 @@ class ReminderDomainHandler(BaseDomainHandler):
                     operation="mark_completed",
                     reminder_id=data["id"]
                 )
+
                 return {
                     "completed": True,
                     "reminder": result.get("reminder"),
@@ -224,7 +215,7 @@ class ReminderDomainHandler(BaseDomainHandler):
                     "failed": failed,
                     "message": f"Completed {len(completed)} of {len(reminder_ids)} reminders"
                 }
-            
+
             elif action == "create":
                 # Create new reminder with all provided fields
                 result = reminder_tool.run(
@@ -275,7 +266,7 @@ class ReminderDomainHandler(BaseDomainHandler):
             
             else:
                 raise ValidationError(f"Unknown action: {action}")
-                
+
         except ValueError as e:
             # Tool raises ValueError for business logic errors
             raise ValidationError(str(e))
@@ -446,19 +437,8 @@ class ContactsDomainHandler(BaseDomainHandler):
     
     def execute_action(self, action: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """Execute contacts actions using ContactsTool."""
-        # Get contacts tool through ToolRepository
-        tool_repo = ToolRepository()
-        
-        # Discover and enable tools if not already done
-        if "contacts_tool" not in tool_repo.tools:
-            tool_repo.discover_tools("tools.implementations")
-            if "contacts_tool" in tool_repo.tools:
-                tool_repo.enable_tool("contacts_tool")
-        
-        contacts_tool = tool_repo.get_tool("contacts_tool")
-        
-        if not contacts_tool:
-            raise NotFoundError("tool", "contacts_tool")
+        from tools.implementations.contacts_tool import ContactsTool
+        contacts_tool = ContactsTool()
         
         try:
             if action == "create":
@@ -658,142 +638,892 @@ class UserDomainHandler(BaseDomainHandler):
 
 
 class DomainKnowledgeDomainHandler(BaseDomainHandler):
-    """Handler for domain knowledge block actions."""
+    """Handler for domaindoc actions with SQLite-based section storage."""
 
     ACTIONS = {
         "create": {
-            "required": ["domain_label", "domain_name", "block_description"],
+            "required": ["label", "description"],
             "optional": [],
-            "types": {
-                "domain_label": str,
-                "domain_name": str,
-                "block_description": str
-            }
+            "types": {"label": str, "description": str}
         },
         "enable": {
-            "required": ["domain_label"],
+            "required": ["label"],
             "optional": [],
-            "types": {"domain_label": str}
+            "types": {"label": str}
         },
         "disable": {
-            "required": ["domain_label"],
+            "required": ["label"],
             "optional": [],
-            "types": {"domain_label": str}
+            "types": {"label": str}
         },
         "delete": {
-            "required": ["domain_label"],
+            "required": ["label"],
             "optional": [],
-            "types": {"domain_label": str}
+            "types": {"label": str}
         },
-        "update": {
-            "required": ["domain_label", "content"],
+        "list": {
+            "required": [],
             "optional": [],
-            "types": {
-                "domain_label": str,
-                "content": str
-            }
+            "types": {}
+        },
+        "get": {
+            "required": ["label"],
+            "optional": [],
+            "types": {"label": str}
+        },
+        "modify_metadata": {
+            "required": ["label"],
+            "optional": ["new_label", "description"],
+            "types": {"label": str, "new_label": str, "description": str}
+        },
+        "list_sections": {
+            "required": ["label"],
+            "optional": ["parent"],
+            "types": {"label": str, "parent": str}
+        },
+        "get_section": {
+            "required": ["label", "section"],
+            "optional": ["parent"],
+            "types": {"label": str, "section": str, "parent": str}
+        },
+        "update_section": {
+            "required": ["label", "section", "content"],
+            "optional": ["parent"],
+            "types": {"label": str, "section": str, "content": str, "parent": str}
+        },
+        "create_section": {
+            "required": ["label", "section", "content"],
+            "optional": ["after", "parent"],
+            "types": {"label": str, "section": str, "content": str, "after": str, "parent": str}
+        },
+        "rename_section": {
+            "required": ["label", "section", "new_name"],
+            "optional": ["parent"],
+            "types": {"label": str, "section": str, "new_name": str, "parent": str}
+        },
+        "delete_section": {
+            "required": ["label", "section"],
+            "optional": ["parent"],
+            "types": {"label": str, "section": str, "parent": str}
+        },
+        "reorder_sections": {
+            "required": ["label", "order"],
+            "optional": ["parent"],
+            "types": {"label": str, "order": list, "parent": str}
+        },
+        "expand_section": {
+            "required": ["label", "section"],
+            "optional": ["parent"],
+            "types": {"label": str, "section": str, "parent": str}
+        },
+        "collapse_section": {
+            "required": ["label", "section"],
+            "optional": ["parent"],
+            "types": {"label": str, "section": str, "parent": str}
+        },
+        "get_section_history": {
+            "required": ["label", "section"],
+            "optional": ["parent"],
+            "types": {"label": str, "section": str, "parent": str}
+        },
+        "rollback_section": {
+            "required": ["label", "section", "version_num"],
+            "optional": ["parent"],
+            "types": {"label": str, "section": str, "version_num": int, "parent": str}
         }
     }
 
-    def execute_action(self, action: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute domain knowledge actions using DomainKnowledgeService."""
-        from cns.services.domain_knowledge_service import get_domain_knowledge_service
+    def _get_db(self):
+        """Get UserDataManager for current user."""
+        from utils.userdata_manager import get_user_data_manager
+        return get_user_data_manager(self.user_id)
 
-        service = get_domain_knowledge_service()
-        if not service:
-            raise ValidationError("Domain knowledge feature is not available (check Letta API key configuration)")
+    def _validate_label(self, label: str) -> None:
+        """Validate domaindoc label."""
+        if not label:
+            raise ValidationError("Label cannot be empty")
+        if not label.replace("_", "").isalnum():
+            raise ValidationError(f"Invalid label '{label}'. Use only letters, numbers, and underscores.")
+
+    def _get_domaindoc(self, db, label: str) -> Dict[str, Any]:
+        """Get domaindoc by label, raising ValidationError if not found."""
+        results = db.select("domaindocs", "label = :label", {"label": label})
+        if not results:
+            raise ValidationError(f"Domaindoc '{label}' not found")
+        return results[0]
+
+    def _get_section(self, db, domaindoc_id: int, header: str, parent_header: str = None) -> Dict[str, Any]:
+        """Get section by header, optionally under a parent."""
+        if parent_header:
+            parent = self._get_section(db, domaindoc_id, parent_header)
+            results = db.fetchall(
+                "SELECT * FROM domaindoc_sections WHERE domaindoc_id = :doc_id AND header = :header AND parent_section_id = :parent_id",
+                {"doc_id": domaindoc_id, "header": header, "parent_id": parent["id"]}
+            )
+            if not results:
+                raise ValidationError(f"Subsection '{header}' not found under '{parent_header}'")
+        else:
+            results = db.fetchall(
+                "SELECT * FROM domaindoc_sections WHERE domaindoc_id = :doc_id AND header = :header AND parent_section_id IS NULL",
+                {"doc_id": domaindoc_id, "header": header}
+            )
+            if not results:
+                raise ValidationError(f"Section '{header}' not found")
+        return db._decrypt_dict(results[0])
+
+    def _get_all_sections(self, db, domaindoc_id: int, parent_id: int = None) -> list:
+        """Get sections ordered by sort_order, optionally filtered by parent."""
+        if parent_id is not None:
+            results = db.fetchall(
+                "SELECT * FROM domaindoc_sections WHERE domaindoc_id = :doc_id AND parent_section_id = :parent_id ORDER BY sort_order",
+                {"doc_id": domaindoc_id, "parent_id": parent_id}
+            )
+        else:
+            results = db.fetchall(
+                "SELECT * FROM domaindoc_sections WHERE domaindoc_id = :doc_id AND parent_section_id IS NULL ORDER BY sort_order",
+                {"doc_id": domaindoc_id}
+            )
+        return [db._decrypt_dict(row) for row in results]
+
+    def _get_subsections(self, db, parent_id: int) -> list:
+        """Get all subsections of a parent section."""
+        results = db.fetchall(
+            "SELECT * FROM domaindoc_sections WHERE parent_section_id = :parent_id ORDER BY sort_order",
+            {"parent_id": parent_id}
+        )
+        return [db._decrypt_dict(row) for row in results]
+
+    def _check_duplicate_section(self, db, domaindoc_id: int, header: str, parent_section_id: int | None, exclude_section_id: int | None = None) -> None:
+        """Raise ValidationError if a section with this header already exists at the same level."""
+        query = """
+            SELECT id FROM domaindoc_sections
+            WHERE domaindoc_id = :doc_id
+            AND header = :header
+            AND parent_section_id IS NOT DISTINCT FROM :parent_id
+        """
+        params = {"doc_id": domaindoc_id, "header": header, "parent_id": parent_section_id}
+
+        if exclude_section_id:
+            query += " AND id != :exclude_id"
+            params["exclude_id"] = exclude_section_id
+
+        existing = db.fetchone(query, params)
+        if existing:
+            level = "subsection" if parent_section_id else "section"
+            raise ValidationError(f"A {level} named '{header}' already exists at this level")
+
+    def _record_version(self, db, domaindoc_id: int, operation: str, diff_data: dict, section_id: int = None) -> int:
+        """Record a version entry for an operation."""
+        import json
+        result = db.fetchone(
+            "SELECT MAX(version_num) as max_ver FROM domaindoc_versions WHERE domaindoc_id = :doc_id",
+            {"doc_id": domaindoc_id}
+        )
+        version_num = (result.get("max_ver") or 0) + 1
+        now = format_utc_iso(utc_now())
+
+        db.insert("domaindoc_versions", {
+            "domaindoc_id": domaindoc_id,
+            "section_id": section_id,
+            "version_num": version_num,
+            "operation": operation,
+            "encrypted__diff_data": json.dumps(diff_data),
+            "created_at": now
+        })
+        return version_num
+
+    def _invalidate_trinket_cache(self) -> None:
+        """Invalidate domaindoc trinket cache after state changes."""
+        user_id = get_current_user_id()
+        hash_key = f"{TRINKET_KEY_PREFIX}:{user_id}"
+        valkey = get_valkey_client()
+        valkey.hdel_with_retry(hash_key, "domaindoc")
+
+    # Read-only actions that don't require cache invalidation
+    _READ_ONLY_ACTIONS = {"list", "get", "list_sections", "get_section", "get_section_history"}
+
+    def execute_action(self, action: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute domaindoc actions using SQLite storage."""
+        import json
 
         try:
+            db = self._get_db()
+
             if action == "create":
-                # Create new domain block
-                result = service.create_domain_block(
-                    domain_label=data["domain_label"],
-                    domain_name=data["domain_name"],
-                    block_description=data["block_description"]
-                )
-                return {
-                    "created": True,
-                    "domain": result,
-                    "message": f"Domain block '{data['domain_name']}' created successfully"
-                }
-
+                result = self._action_create(db, data)
             elif action == "enable":
-                # Enable domain block (inject into system prompt)
-                service.enable_domain(data["domain_label"])
-                return {
-                    "enabled": True,
-                    "domain_label": data["domain_label"],
-                    "message": "Domain block enabled"
-                }
-
+                result = self._action_enable(db, data)
             elif action == "disable":
-                # Disable domain block (remove from system prompt)
-                service.disable_domain(data["domain_label"])
-                return {
-                    "disabled": True,
-                    "domain_label": data["domain_label"],
-                    "message": "Domain block disabled"
-                }
-
+                result = self._action_disable(db, data)
             elif action == "delete":
-                # Delete domain block and sleeptime agent
-                service.delete_domain(data["domain_label"])
-                return {
-                    "deleted": True,
-                    "domain_label": data["domain_label"],
-                    "message": "Domain block deleted"
-                }
-
-            elif action == "update":
-                # Manually update domain block content
-                service.update_block_content(
-                    domain_label=data["domain_label"],
-                    new_content=data["content"]
-                )
-                return {
-                    "updated": True,
-                    "domain_label": data["domain_label"],
-                    "message": "Domain block content updated"
-                }
-
+                result = self._action_delete(db, data)
+            elif action == "list":
+                result = self._action_list(db)
+            elif action == "get":
+                result = self._action_get(db, data)
+            elif action == "modify_metadata":
+                result = self._action_modify_metadata(db, data)
+            elif action == "list_sections":
+                result = self._action_list_sections(db, data)
+            elif action == "get_section":
+                result = self._action_get_section(db, data)
+            elif action == "update_section":
+                result = self._action_update_section(db, data)
+            elif action == "create_section":
+                result = self._action_create_section(db, data)
+            elif action == "rename_section":
+                result = self._action_rename_section(db, data)
+            elif action == "delete_section":
+                result = self._action_delete_section(db, data)
+            elif action == "reorder_sections":
+                result = self._action_reorder_sections(db, data)
+            elif action == "expand_section":
+                result = self._action_expand_section(db, data)
+            elif action == "collapse_section":
+                result = self._action_collapse_section(db, data)
+            elif action == "get_section_history":
+                result = self._action_get_section_history(db, data)
+            elif action == "rollback_section":
+                result = self._action_rollback_section(db, data)
             else:
                 raise ValidationError(f"Unknown action: {action}")
 
-        except ValueError as e:
-            # Service raises ValueError for business logic errors
-            raise ValidationError(str(e))
+            # Invalidate trinket cache after write operations
+            if action not in self._READ_ONLY_ACTIONS:
+                self._invalidate_trinket_cache()
+
+            return result
+
+        except ValidationError:
+            raise
+        except Exception as e:
+            logger.error(f"Domaindoc action '{action}' failed: {e}", exc_info=True)
+            raise ValidationError(f"Action failed: {str(e)}")
+
+    def _action_create(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new domaindoc."""
+        label = data["label"]
+        description = data["description"]
+
+        self._validate_label(label)
+        if not description or len(description) > 1000:
+            raise ValidationError("Description must be 1-1000 characters")
+
+        existing = db.select("domaindocs", "label = :label", {"label": label})
+        if existing:
+            raise ValidationError(f"Domaindoc '{label}' already exists")
+
+        expanded_description = self._expand_description(label, description)
+        now = format_utc_iso(utc_now())
+
+        domaindoc_id = db.insert("domaindocs", {
+            "label": label,
+            "encrypted__description": expanded_description,
+            "enabled": False,
+            "created_at": now,
+            "updated_at": now
+        })
+
+        db.insert("domaindoc_sections", {
+            "domaindoc_id": int(domaindoc_id),
+            "header": "OVERVIEW",
+            "encrypted__content": "",
+            "sort_order": 0,
+            "collapsed": False,
+            "created_at": now,
+            "updated_at": now
+        })
+
+        return {
+            "created": True,
+            "label": label,
+            "description": expanded_description,
+            "message": f"Domaindoc '{label}' created. Use enable action to activate it."
+        }
+
+    def _action_enable(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Enable a domaindoc. Collapses all sections except first."""
+        label = data["label"]
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+        now = format_utc_iso(utc_now())
+
+        db.execute(
+            "UPDATE domaindocs SET enabled = TRUE, updated_at = :now WHERE id = :id",
+            {"now": now, "id": doc["id"]}
+        )
+        db.execute(
+            "UPDATE domaindoc_sections SET collapsed = TRUE, updated_at = :now WHERE domaindoc_id = :doc_id AND sort_order > 0",
+            {"now": now, "doc_id": doc["id"]}
+        )
+
+        return {"enabled": True, "label": label, "message": f"Domaindoc '{label}' enabled"}
+
+    def _action_disable(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Disable a domaindoc."""
+        label = data["label"]
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+        now = format_utc_iso(utc_now())
+
+        db.execute(
+            "UPDATE domaindocs SET enabled = FALSE, updated_at = :now WHERE id = :id",
+            {"now": now, "id": doc["id"]}
+        )
+
+        return {"disabled": True, "label": label, "message": f"Domaindoc '{label}' disabled"}
+
+    def _action_delete(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Delete a domaindoc and all its sections."""
+        label = data["label"]
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+
+        db.execute("DELETE FROM domaindocs WHERE id = :id", {"id": doc["id"]})
+
+        return {"deleted": True, "label": label, "message": f"Domaindoc '{label}' deleted"}
+
+    def _action_list(self, db) -> Dict[str, Any]:
+        """List all domaindocs."""
+        results = db.fetchall("SELECT * FROM domaindocs ORDER BY label")
+        domains = [db._decrypt_dict(row) for row in results]
+
+        return {
+            "domains": [
+                {
+                    "label": d["label"],
+                    "description": d.get("encrypted__description", ""),
+                    "enabled": d.get("enabled", False),
+                    "created_at": d.get("created_at"),
+                    "updated_at": d.get("updated_at")
+                }
+                for d in domains
+            ],
+            "count": len(domains),
+            "message": f"Found {len(domains)} domaindocs"
+        }
+
+    def _action_get(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Get a domaindoc with all its sections (including subsections)."""
+        label = data["label"]
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+
+        # Get ALL sections for this domaindoc (both top-level and subsections)
+        all_results = db.fetchall(
+            "SELECT * FROM domaindoc_sections WHERE domaindoc_id = :doc_id ORDER BY parent_section_id NULLS FIRST, sort_order",
+            {"doc_id": doc["id"]}
+        )
+        all_sections = [db._decrypt_dict(row) for row in all_results]
+
+        return {
+            "label": label,
+            "description": doc.get("encrypted__description", ""),
+            "enabled": doc.get("enabled", False),
+            "created_at": doc.get("created_at"),
+            "updated_at": doc.get("updated_at"),
+            "sections": [
+                {
+                    "id": s["id"],
+                    "header": s["header"],
+                    "content": s.get("encrypted__content", ""),
+                    "collapsed": s.get("collapsed", False),
+                    "sort_order": s.get("sort_order", 0),
+                    "parent_section_id": s.get("parent_section_id"),
+                    "updated_at": s.get("updated_at"),
+                    "created_at": s.get("created_at")
+                }
+                for s in all_sections
+            ],
+            "message": f"Retrieved domaindoc '{label}'"
+        }
+
+    def _action_modify_metadata(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Modify domaindoc label or description."""
+        label = data["label"]
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+
+        new_label = data.get("new_label")
+        new_description = data.get("description")
+
+        if not new_label and not new_description:
+            raise ValidationError("At least one of 'new_label' or 'description' must be provided")
+
+        updates = {"updated_at": format_utc_iso(utc_now())}
+
+        if new_label:
+            self._validate_label(new_label)
+            # Check for collision
+            existing = db.select("domaindocs", "label = :label AND id != :id", {"label": new_label, "id": doc["id"]})
+            if existing:
+                raise ValidationError(f"Domaindoc '{new_label}' already exists")
+            updates["label"] = new_label
+
+        if new_description:
+            if len(new_description) > 2000:
+                raise ValidationError("Description must be under 2000 characters")
+            updates["encrypted__description"] = new_description
+
+        db.update("domaindocs", updates, "id = :id", {"id": doc["id"]})
+
+        return {
+            "updated": True,
+            "label": new_label or label,
+            "description": new_description or doc.get("encrypted__description"),
+            "message": f"Domaindoc metadata updated"
+        }
+
+    def _action_list_sections(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """List sections for a domaindoc, optionally under a parent."""
+        label = data["label"]
+        parent_header = data.get("parent")
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+
+        if parent_header:
+            parent = self._get_section(db, doc["id"], parent_header)
+            sections = self._get_all_sections(db, doc["id"], parent_id=parent["id"])
+        else:
+            sections = self._get_all_sections(db, doc["id"])
+
+        return {
+            "label": label,
+            "parent": parent_header,
+            "sections": [
+                {
+                    "header": s["header"],
+                    "collapsed": s.get("collapsed", False),
+                    "sort_order": s.get("sort_order", 0),
+                    "char_count": len(s.get("encrypted__content", "")),
+                    "has_children": len(self._get_subsections(db, s["id"])) > 0,
+                    "child_count": len(self._get_subsections(db, s["id"]))
+                }
+                for s in sections
+            ]
+        }
+
+    def _action_get_section(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Get a single section's content."""
+        label = data["label"]
+        header = data["section"]
+        parent_header = data.get("parent")
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+        section = self._get_section(db, doc["id"], header, parent_header)
+        subsections = self._get_subsections(db, section["id"])
+
+        return {
+            "label": label,
+            "section": header,
+            "parent": parent_header,
+            "content": section.get("encrypted__content", ""),
+            "collapsed": section.get("collapsed", False),
+            "sort_order": section.get("sort_order", 0),
+            "has_children": len(subsections) > 0,
+            "child_count": len(subsections)
+        }
+
+    def _action_update_section(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Update a section's content (full replacement via UI)."""
+        label = data["label"]
+        header = data["section"]
+        content = data["content"]
+        parent_header = data.get("parent")
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+        section = self._get_section(db, doc["id"], header, parent_header)
+        previous_content = section.get("encrypted__content", "")
+        now = format_utc_iso(utc_now())
+
+        db.update(
+            "domaindoc_sections",
+            {"encrypted__content": content, "updated_at": now},
+            "id = :id",
+            {"id": section["id"]}
+        )
+
+        # Record version for UI edits (destructive - needs previous content)
+        self._record_version(db, doc["id"], "ui_replace", {
+            "section": header,
+            "previous_content": previous_content,
+            "new_length": len(content),
+            "parent": parent_header
+        }, section["id"])
+
+        return {"updated": True, "label": label, "section": header, "parent": parent_header, "char_count": len(content)}
+
+    def _action_create_section(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new section or subsection."""
+        label = data["label"]
+        header = data["section"]
+        content = data["content"]
+        after = data.get("after")
+        parent_header = data.get("parent")
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+        now = format_utc_iso(utc_now())
+
+        parent_id = None
+        if parent_header:
+            # Creating a subsection - validate depth
+            parent = self._get_section(db, doc["id"], parent_header)
+            if parent.get("parent_section_id") is not None:
+                raise ValidationError("Maximum nesting depth is 1. Cannot add subsection to a subsection.")
+            if parent["sort_order"] == 0:
+                raise ValidationError("Cannot add subsections to the overview section")
+            parent_id = parent["id"]
+
+        # Get sections at the target level (top-level or within parent)
+        sections = self._get_all_sections(db, doc["id"], parent_id)
+
+        # Check for duplicate section name at this level
+        self._check_duplicate_section(db, doc["id"], header, parent_id)
+
+        if after:
+            after_sec = self._get_section(db, doc["id"], after, parent_header)
+            new_order = after_sec["sort_order"] + 1
+            for sec in sections:
+                if sec["sort_order"] >= new_order:
+                    db.execute(
+                        "UPDATE domaindoc_sections SET sort_order = sort_order + 1 WHERE id = :id",
+                        {"id": sec["id"]}
+                    )
+        else:
+            new_order = max((s["sort_order"] for s in sections), default=-1) + 1
+
+        section_id = db.insert("domaindoc_sections", {
+            "domaindoc_id": doc["id"],
+            "parent_section_id": parent_id,
+            "header": header,
+            "encrypted__content": content,
+            "sort_order": new_order,
+            "collapsed": True,  # New sections start collapsed
+            "created_at": now,
+            "updated_at": now
+        })
+
+        # Record version
+        self._record_version(db, doc["id"], "ui_create_section", {
+            "header": header,
+            "content_length": len(content),
+            "after": after,
+            "sort_order": new_order,
+            "parent": parent_header
+        }, int(section_id))
+
+        return {"created": True, "label": label, "section": header, "parent": parent_header, "sort_order": new_order}
+
+    def _action_rename_section(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Rename a section or subsection header."""
+        label = data["label"]
+        header = data["section"]
+        new_name = data["new_name"]
+        parent_header = data.get("parent")
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+        section = self._get_section(db, doc["id"], header, parent_header)
+
+        # Check for duplicate (exclude current section to allow case changes)
+        parent_id = section.get("parent_section_id")
+        self._check_duplicate_section(db, doc["id"], new_name, parent_id, exclude_section_id=section["id"])
+
+        now = format_utc_iso(utc_now())
+
+        db.execute(
+            "UPDATE domaindoc_sections SET header = :new_name, updated_at = :now WHERE id = :id",
+            {"new_name": new_name, "now": now, "id": section["id"]}
+        )
+
+        # Record version
+        self._record_version(db, doc["id"], "ui_rename_section", {
+            "old_name": header,
+            "new_name": new_name,
+            "parent": parent_header
+        }, section["id"])
+
+        return {"renamed": True, "label": label, "from": header, "to": new_name, "parent": parent_header}
+
+    def _action_delete_section(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Delete a section or subsection."""
+        label = data["label"]
+        header = data["section"]
+        parent_header = data.get("parent")
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+        section = self._get_section(db, doc["id"], header, parent_header)
+
+        # Can't delete overview (first top-level section)
+        if section["sort_order"] == 0 and section.get("parent_section_id") is None:
+            raise ValidationError("Cannot delete the first section (overview)")
+
+        # For top-level sections, check if section AND all subsections are expanded
+        deleted_children = []
+        if section.get("parent_section_id") is None:
+            subsections = self._get_subsections(db, section["id"])
+            if subsections:
+                # Check section itself is expanded
+                if section.get("collapsed"):
+                    raise ValidationError(f"Please expand section '{header}' before deleting to review its contents")
+                # Check all subsections are expanded
+                collapsed_subs = [s["header"] for s in subsections if s.get("collapsed")]
+                if collapsed_subs:
+                    raise ValidationError(
+                        f"Please expand all subsections of '{header}' before deleting to confirm you've reviewed their contents: {collapsed_subs}"
+                    )
+                deleted_children = [s["header"] for s in subsections]
+
+        # Record version BEFORE delete (destructive - store content for undo)
+        self._record_version(db, doc["id"], "ui_delete_section", {
+            "header": header,
+            "deleted_content": section.get("encrypted__content", ""),
+            "sort_order": section["sort_order"],
+            "parent": parent_header,
+            "deleted_children": deleted_children
+        }, section["id"])
+
+        # Delete cascades to children via FK ON DELETE CASCADE
+        db.execute("DELETE FROM domaindoc_sections WHERE id = :id", {"id": section["id"]})
+
+        # Renumber remaining sections at the same level
+        parent_id = section.get("parent_section_id")
+        sections = self._get_all_sections(db, doc["id"], parent_id)
+        for i, s in enumerate(sections):
+            if s["sort_order"] != i:
+                db.execute(
+                    "UPDATE domaindoc_sections SET sort_order = :order WHERE id = :id",
+                    {"order": i, "id": s["id"]}
+                )
+
+        result = {"deleted": True, "label": label, "section": header, "parent": parent_header}
+        if deleted_children:
+            result["deleted_children"] = deleted_children
+        return result
+
+    def _action_reorder_sections(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Reorder sections at a level (top-level or within a parent)."""
+        label = data["label"]
+        order = data["order"]
+        parent_header = data.get("parent")
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+
+        parent_id = None
+        if parent_header:
+            parent = self._get_section(db, doc["id"], parent_header)
+            parent_id = parent["id"]
+
+        sections = self._get_all_sections(db, doc["id"], parent_id)
+
+        existing = {s["header"] for s in sections}
+        provided = set(order)
+
+        if existing != provided:
+            level_desc = f"subsections of '{parent_header}'" if parent_header else "top-level sections"
+            raise ValidationError(f"Order must contain exactly all {level_desc}: {list(existing)}")
+
+        now = format_utc_iso(utc_now())
+        for new_order, header in enumerate(order):
+            sec = next(s for s in sections if s["header"] == header)
+            db.execute(
+                "UPDATE domaindoc_sections SET sort_order = :order, updated_at = :now WHERE id = :id",
+                {"order": new_order, "now": now, "id": sec["id"]}
+            )
+
+        return {"reordered": True, "label": label, "order": order, "parent": parent_header}
+
+    def _action_expand_section(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Expand a section or subsection."""
+        label = data["label"]
+        header = data["section"]
+        parent_header = data.get("parent")
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+        section = self._get_section(db, doc["id"], header, parent_header)
+        now = format_utc_iso(utc_now())
+
+        db.execute(
+            "UPDATE domaindoc_sections SET collapsed = FALSE, updated_at = :now WHERE id = :id",
+            {"now": now, "id": section["id"]}
+        )
+
+        return {"expanded": True, "label": label, "section": header, "parent": parent_header}
+
+    def _action_collapse_section(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Collapse a section or subsection."""
+        label = data["label"]
+        header = data["section"]
+        parent_header = data.get("parent")
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+        section = self._get_section(db, doc["id"], header, parent_header)
+
+        # Can't collapse first top-level section (overview)
+        if section["sort_order"] == 0 and section.get("parent_section_id") is None:
+            return {"collapsed": False, "label": label, "section": header, "parent": parent_header, "note": "First section cannot be collapsed"}
+
+        now = format_utc_iso(utc_now())
+        db.execute(
+            "UPDATE domaindoc_sections SET collapsed = TRUE, updated_at = :now WHERE id = :id",
+            {"now": now, "id": section["id"]}
+        )
+
+        return {"collapsed": True, "label": label, "section": header, "parent": parent_header}
+
+    def _action_get_section_history(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Get version history for a section or subsection."""
+        import json
+        label = data["label"]
+        header = data["section"]
+        parent_header = data.get("parent")
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+        section = self._get_section(db, doc["id"], header, parent_header)
+
+        results = db.fetchall(
+            "SELECT * FROM domaindoc_versions WHERE domaindoc_id = :doc_id AND section_id = :sec_id ORDER BY version_num DESC",
+            {"doc_id": doc["id"], "sec_id": section["id"]}
+        )
+        versions = [db._decrypt_dict(row) for row in results]
+
+        return {
+            "label": label,
+            "section": header,
+            "parent": parent_header,
+            "versions": [
+                {
+                    "version_num": v["version_num"],
+                    "operation": v["operation"],
+                    "diff_data": json.loads(v.get("encrypted__diff_data", "{}")) if v.get("encrypted__diff_data") else {},
+                    "created_at": v.get("created_at")
+                }
+                for v in versions
+            ]
+        }
+
+    def _action_rollback_section(self, db, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Rollback a section or subsection to a previous version using stored previous_content."""
+        import json
+        label = data["label"]
+        header = data["section"]
+        version_num = data["version_num"]
+        parent_header = data.get("parent")
+        self._validate_label(label)
+        doc = self._get_domaindoc(db, label)
+        section = self._get_section(db, doc["id"], header, parent_header)
+
+        # Find the target version
+        result = db.fetchone(
+            "SELECT * FROM domaindoc_versions WHERE domaindoc_id = :doc_id AND section_id = :sec_id AND version_num = :ver",
+            {"doc_id": doc["id"], "sec_id": section["id"], "ver": version_num}
+        )
+        if not result:
+            raise ValidationError(f"Version {version_num} not found for section '{header}'")
+
+        version = db._decrypt_dict(result)
+        diff_data = json.loads(version.get("encrypted__diff_data", "{}"))
+
+        if "previous_content" not in diff_data:
+            raise ValidationError(f"Version {version_num} does not contain restorable content")
+
+        # Restore the content
+        restored_content = diff_data["previous_content"]
+        now = format_utc_iso(utc_now())
+
+        db.update(
+            "domaindoc_sections",
+            {"encrypted__content": restored_content, "updated_at": now},
+            "id = :id",
+            {"id": section["id"]}
+        )
+
+        # Record the rollback as a new version
+        next_ver_result = db.fetchone(
+            "SELECT MAX(version_num) as max_ver FROM domaindoc_versions WHERE domaindoc_id = :doc_id",
+            {"doc_id": doc["id"]}
+        )
+        next_ver = (next_ver_result.get("max_ver") or 0) + 1
+
+        db.insert("domaindoc_versions", {
+            "domaindoc_id": doc["id"],
+            "section_id": section["id"],
+            "version_num": next_ver,
+            "operation": "rollback",
+            "encrypted__diff_data": json.dumps({
+                "rolled_back_to": version_num,
+                "restored_length": len(restored_content),
+                "parent": parent_header
+            }),
+            "created_at": now
+        })
+
+        return {
+            "rolled_back": True,
+            "label": label,
+            "section": header,
+            "parent": parent_header,
+            "to_version": version_num,
+            "new_version": next_ver,
+            "restored_chars": len(restored_content)
+        }
+
+    def _expand_description(self, label: str, description: str) -> str:
+        """Use LLM to expand a brief description into comprehensive guidance."""
+        from clients.llm_provider import LLMProvider
+
+        try:
+            llm = LLMProvider()
+
+            prompt = f"""You are helping expand a brief description into comprehensive guidance for a knowledge document.
+
+The user wants to create a domain knowledge document called "{label}" with this description:
+"{description}"
+
+Expand this into a well-formed descriptor (1-3 sentences) that clearly explains:
+1. What topics this document covers
+2. What specific information should be recorded
+3. The level of detail expected
+
+Write ONLY the expanded description, nothing else. Be specific and actionable.
+Example input: "plants, bugs, where I buy stuff"
+Example output: "Backyard garden management: current plantings with locations and planting dates, pest and disease observations with treatments applied, soil amendments and fertilizer schedules, preferred suppliers and product recommendations, and seasonal lessons learned."
+"""
+
+            response = llm.generate_response(
+                messages=[{"role": "user", "content": prompt}],
+                thinking_enabled=False
+            )
+
+            expanded = llm.extract_text_content(response).strip()
+
+            if expanded and len(expanded) > 20:
+                return expanded
+            else:
+                logger.warning(f"LLM expansion too short, using original: {expanded}")
+                return description
+
+        except Exception as e:
+            logger.warning(f"Failed to expand description via LLM: {e}")
+            return description
 
 
 class ContinuumDomainHandler(BaseDomainHandler):
-    """Handler for continuum-level configuration actions."""
-
-    # Valid model identifiers that users can select
-    VALID_MODELS = [
-        "claude-opus-4-5-20251101",
-        "claude-haiku-4-5-20251001",
-    ]
+    """Handler for continuum-level configuration actions (LLM tier, segment collapse)."""
 
     ACTIONS = {
-        "set_thinking_budget_preference": {
-            "required": [],
-            "optional": ["budget"],
-            "types": {
-                "budget": (int, type(None))
-            }
-        },
-        "get_thinking_budget_preference": {
+        "get_llm_tier": {
             "required": [],
             "optional": [],
             "types": {}
         },
-        "set_model_preference": {
-            "required": [],
-            "optional": ["model"],
+        "set_llm_tier": {
+            "required": ["tier"],
+            "optional": [],
             "types": {
-                "model": (str, type(None))
+                "tier": str
             }
         },
-        "get_model_preference": {
+        "collapse_segment": {
             "required": [],
             "optional": [],
             "types": {}
@@ -801,94 +1531,77 @@ class ContinuumDomainHandler(BaseDomainHandler):
     }
 
     def execute_action(self, action: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute continuum configuration actions."""
-        if action == "set_thinking_budget_preference":
-            from cns.infrastructure.continuum_pool import get_continuum_pool
+        """Execute LLM tier actions."""
+        if action == "get_llm_tier":
+            from utils.user_context import get_user_preferences, get_account_tiers
 
-            budget = data.get("budget")
-
-            # Validate budget if provided
-            if budget is not None:
-                if not isinstance(budget, int):
-                    raise ValidationError("Budget must be an integer or null")
-                if budget < 0:
-                    raise ValidationError("Budget must be None, 0, or a positive integer")
-                # Validate against allowed values
-                valid_budgets = [0, 1024, 4096, 32000]
-                if budget not in valid_budgets:
-                    raise ValidationError(
-                        f"Budget must be one of {valid_budgets} or null. Got: {budget}"
-                    )
-
-            pool = get_continuum_pool()
-            continuum = pool.get_or_create()
-
-            # Set the preference in Valkey
-            pool.set_thinking_budget_preference(budget)
-
+            prefs = get_user_preferences()
+            tiers = get_account_tiers()
             return {
                 "success": True,
-                "continuum_id": str(continuum.id),
-                "budget": budget,
-                "message": f"Thinking budget preference set to {budget}"
+                "tier": prefs.llm_tier,
+                "available_tiers": [
+                    {"name": t.name, "description": t.description}
+                    for t in tiers.values()
+                ]
             }
 
-        elif action == "get_thinking_budget_preference":
-            from cns.infrastructure.continuum_pool import get_continuum_pool
+        elif action == "set_llm_tier":
+            from utils.user_context import update_user_preference, get_account_tiers
 
-            pool = get_continuum_pool()
-            continuum = pool.get_or_create()
+            tier = data.get("tier")
+            tiers = get_account_tiers()
+            if tier not in tiers:
+                raise ValidationError(
+                    f"Invalid tier. Must be one of: {list(tiers.keys())}"
+                )
 
-            # Get the preference from Valkey
-            budget = pool.get_thinking_budget_preference()
-
+            update_user_preference('llm_tier', tier)
             return {
                 "success": True,
-                "continuum_id": str(continuum.id),
-                "budget": budget
+                "tier": tier,
+                "message": f"LLM tier set to {tier}"
             }
 
-        elif action == "set_model_preference":
+        elif action == "collapse_segment":
             from cns.infrastructure.continuum_pool import get_continuum_pool
+            from cns.infrastructure.continuum_repository import get_continuum_repository
+            from cns.core.events import SegmentTimeoutEvent
+            from cns.services.segment_collapse_handler import get_segment_collapse_handler
 
-            model = data.get("model")
+            # Get user's continuum and active segment
+            continuum_pool = get_continuum_pool()
+            continuum = continuum_pool.get_or_create()
 
-            # Validate model if provided
-            if model is not None:
-                if not isinstance(model, str):
-                    raise ValidationError("Model must be a string or null")
-                if model not in self.VALID_MODELS:
-                    raise ValidationError(
-                        f"Model must be one of {self.VALID_MODELS} or null. Got: {model}"
-                    )
+            continuum_repo = get_continuum_repository()
+            sentinel = continuum_repo.find_active_segment(continuum.id, self.user_id)
 
-            pool = get_continuum_pool()
-            continuum = pool.get_or_create()
+            if not sentinel:
+                raise NotFoundError("segment", "active")
 
-            # Set the preference in Valkey
-            pool.set_model_preference(model)
+            segment_id = sentinel.metadata.get("segment_id")
+
+            # Create event and invoke the collapse handler
+            event = SegmentTimeoutEvent.create(
+                continuum_id=str(continuum.id),
+                user_id=self.user_id,
+                segment_id=segment_id,
+                inactive_duration_minutes=0,  # Manual trigger
+                local_hour=utc_now().hour
+            )
+
+            handler = get_segment_collapse_handler()
+            collapsed_sentinel = handler.handle_timeout(event)
+
+            if not collapsed_sentinel:
+                raise ValidationError("Segment collapse failed - check server logs")
 
             return {
-                "success": True,
-                "continuum_id": str(continuum.id),
-                "model": model,
-                "message": f"Model preference set to {model}"
-            }
-
-        elif action == "get_model_preference":
-            from cns.infrastructure.continuum_pool import get_continuum_pool
-
-            pool = get_continuum_pool()
-            continuum = pool.get_or_create()
-
-            # Get the preference from Valkey
-            model = pool.get_model_preference()
-
-            return {
-                "success": True,
-                "continuum_id": str(continuum.id),
-                "model": model,
-                "available_models": self.VALID_MODELS
+                "collapsed": True,
+                "segment_id": segment_id,
+                "summary": collapsed_sentinel.metadata.get("segment_summary"),
+                "title": collapsed_sentinel.metadata.get("display_title"),
+                "message": "Segment collapsed successfully"
             }
 
         else:
@@ -1005,6 +1718,104 @@ async def actions_endpoint(
                 "error": {
                     "code": "INTERNAL_ERROR",
                     "message": "Action execution failed"
+                }
+            }
+        )
+
+
+# =============================================================================
+# TOOL QUERY ENDPOINT
+# =============================================================================
+
+# Whitelist of tools that can be queried directly via API
+QUERYABLE_TOOLS = {"reminder_tool", "contacts_tool"}
+
+
+def _get_tool_instance(tool_name: str):
+    """Import and instantiate a tool by name."""
+    if tool_name == "reminder_tool":
+        from tools.implementations.reminder_tool import ReminderTool
+        return ReminderTool()
+    elif tool_name == "contacts_tool":
+        from tools.implementations.contacts_tool import ContactsTool
+        return ContactsTool()
+    else:
+        raise ValueError(f"Unknown tool: {tool_name}")
+
+
+@router.get("/tools/{tool_name}/query")
+async def query_tool(
+    tool_name: str,
+    operation: str = Query(..., description="Tool operation to execute"),
+    date_type: Optional[str] = Query(None, description="Date filter type (for reminder_tool)"),
+    category: Optional[str] = Query(None, description="Category filter (for reminder_tool)"),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Query a tool directly for read-only operations.
+
+    This endpoint allows the UI to query tool data without going through
+    the LLM or trinket system. Useful for polling current state.
+
+    Only whitelisted tools can be queried.
+    """
+    # Set user context
+    set_current_user_id(current_user["user_id"])
+
+    if tool_name not in QUERYABLE_TOOLS:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "success": False,
+                "error": {
+                    "code": "FORBIDDEN",
+                    "message": f"Tool '{tool_name}' is not queryable via API"
+                }
+            }
+        )
+
+    try:
+        tool = _get_tool_instance(tool_name)
+
+        # Build kwargs from query params (only include non-None values)
+        kwargs = {"operation": operation}
+        if date_type is not None:
+            kwargs["date_type"] = date_type
+        if category is not None:
+            kwargs["category"] = category
+
+        result = tool.run(**kwargs)
+
+        return {
+            "success": True,
+            "data": result,
+            "meta": {
+                "tool": tool_name,
+                "operation": operation,
+                "timestamp": format_utc_iso(utc_now())
+            }
+        }
+
+    except ValueError as e:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "error": {
+                    "code": "VALIDATION_ERROR",
+                    "message": str(e)
+                }
+            }
+        )
+    except Exception as e:
+        logger.error(f"Tool query error for {tool_name}: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": str(e)
                 }
             }
         )

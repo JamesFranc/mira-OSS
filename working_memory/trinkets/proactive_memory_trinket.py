@@ -61,65 +61,70 @@ class ProactiveMemoryTrinket(EventAwareTrinket):
         return memory_content
     
     def _format_memories_for_prompt(self, memories: List[Dict[str, Any]]) -> str:
-        """Format memories with hierarchical tree structure showing linked relationships."""
+        """Format memories as XML with nested linked_memories elements."""
         if not memories:
             return ""
 
-        content_parts = ["=== SURFACED MEMORIES ==="]
-        content_parts.append("")
+        parts = ["<surfaced_memories>"]
 
         for memory in memories:
-            # Format primary memory
-            content_parts.extend(self._format_primary_memory(memory))
-            content_parts.append("")
+            parts.append(self._format_primary_memory_xml(memory))
 
-        return "\n".join(content_parts)
+        parts.append("</surfaced_memories>")
+        return "\n".join(parts)
 
-    def _format_primary_memory(self, memory: Dict[str, Any]) -> List[str]:
-        """Format a primary memory with its linked memories in tree structure."""
-        lines = []
+    def _format_primary_memory_xml(self, memory: Dict[str, Any]) -> str:
+        """Format a primary memory as XML with nested linked_memories."""
+        from utils.timezone_utils import format_relative_time, parse_time_string, format_datetime
 
-        # Memory header with optional confidence
+        memory_id = memory.get('id', 'unknown')
+        text = memory.get('text', '')
+
+        # Build attributes
+        attrs = [f'id="{memory_id}"']
+
         confidence = memory.get('confidence') or memory.get('similarity_score')
         if confidence is not None and confidence > 0.75:
-            conf_percentage = int(confidence * 100)
-            lines.append(f"[AUTOMATICALLY SURFACED SUBCONSCIOUS MEMORY | CONFIDENCE: {conf_percentage}%]")
-        else:
-            lines.append("[AUTOMATICALLY SURFACED SUBCONSCIOUS MEMORY]")
+            attrs.append(f'confidence="{int(confidence * 100)}"')
 
-        lines.append(f"ID: {memory.get('id', 'unknown')}")
-        lines.append(f"Text: \"{memory.get('text', '')}\")")
+        parts = [f"<memory {' '.join(attrs)}>"]
+        parts.append(f"<text>{text}</text>")
 
+        # Created time
         if memory.get('created_at'):
-            from utils.timezone_utils import format_relative_time, parse_time_string
-
             created_dt = parse_time_string(memory['created_at'])
             relative_time = format_relative_time(created_dt)
-            lines.append(f"Created: {relative_time}")
+            parts.append(f"<created>{relative_time}</created>")
 
-        # Format temporal info if present
-        temporal_info = self._format_temporal_info(memory)
-        if temporal_info:
-            lines.append(temporal_info)
+        # Temporal info
+        temporal_attrs = []
+        if memory.get('expires_at'):
+            expires_dt = parse_time_string(memory['expires_at'])
+            expiry_date = format_datetime(expires_dt, 'date')
+            temporal_attrs.append(f'expires="{expiry_date}"')
+        if memory.get('happens_at'):
+            happens_dt = parse_time_string(memory['happens_at'])
+            event_date = format_datetime(happens_dt, 'date')
+            temporal_attrs.append(f'happens="{event_date}"')
+        if temporal_attrs:
+            parts.append(f"<temporal {' '.join(temporal_attrs)}/>")
 
-        # Format linked memories
+        # Linked memories (nested)
         linked_memories = memory.get('linked_memories', [])
         if linked_memories:
-            lines.append("")
-            lines.extend(self._format_linked_memories(linked_memories, is_last_group=True))
+            parts.append(self._format_linked_memories_xml(linked_memories, current_depth=1))
 
-        return lines
+        parts.append("</memory>")
+        return "\n".join(parts)
 
-    def _format_linked_memories(
+    def _format_linked_memories_xml(
         self,
         linked_memories: List[Dict[str, Any]],
-        indent: str = "",
-        is_last_group: bool = False,
         current_depth: int = 1,
         max_display_depth: int = 2
-    ) -> List[str]:
+    ) -> str:
         """
-        Recursively format linked memories with tree structure.
+        Recursively format linked memories as nested XML elements.
 
         NOTE: max_display_depth is distinct from traversal depth:
         - Traversal depth (config.max_link_traversal_depth): How deep to walk the graph
@@ -130,83 +135,44 @@ class ProactiveMemoryTrinket(EventAwareTrinket):
 
         Args:
             linked_memories: List of linked memory dicts
-            indent: Current indentation string
-            is_last_group: Whether this is the last group at this level
             current_depth: Current display depth (1-indexed)
             max_display_depth: Maximum depth to display (default 2 = Primary + 2 levels)
         """
-        lines = []
-
         # Stop display if we've reached max depth
         if current_depth > max_display_depth:
-            return lines
+            return ""
 
-        for i, linked in enumerate(linked_memories):
-            is_last = (i == len(linked_memories) - 1)
+        if not linked_memories:
+            return ""
 
-            # Tree symbols
-            if is_last:
-                branch = "└─"
-                continuation = "   "
-            else:
-                branch = "├─"
-                continuation = "│  "
+        parts = ["<linked_memories>"]
 
+        for linked in linked_memories:
             # Link metadata
             link_meta = linked.get('link_metadata', {})
             link_type = link_meta.get('link_type', 'unknown')
             confidence = link_meta.get('confidence')
 
-            # Format header with confidence only if over 75%
+            # Build attributes
+            attrs = [f'id="{linked.get("id", "unknown")}"', f'link_type="{link_type}"']
             if confidence is not None and confidence > 0.75:
-                conf_percentage = int(confidence * 100)
-                header = f"{indent}{branch} [^ LINKED MEMORY - LINK TYPE: {link_type} | CONFIDENCE: {conf_percentage}%]"
-            else:
-                header = f"{indent}{branch} [^ LINKED MEMORY - LINK TYPE: {link_type}]"
+                attrs.append(f'confidence="{int(confidence * 100)}"')
 
-            lines.append(header)
-
-            # Memory details with continuation indentation
-            detail_indent = indent + continuation
-            lines.append(f"{detail_indent}ID: {linked.get('id', 'unknown')}")
-            lines.append(f"{detail_indent}Text: \"{linked.get('text', '')}\")")
+            parts.append(f"<linked_memory {' '.join(attrs)}>")
+            parts.append(f"<text>{linked.get('text', '')}</text>")
 
             # Nested linked memories (recursive)
             nested_linked = linked.get('linked_memories', [])
             if nested_linked:
-                lines.append(f"{detail_indent}")
-                lines.extend(
-                    self._format_linked_memories(
-                        nested_linked,
-                        indent=detail_indent,
-                        is_last_group=True,
-                        current_depth=current_depth + 1,
-                        max_display_depth=max_display_depth
-                    )
+                nested_xml = self._format_linked_memories_xml(
+                    nested_linked,
+                    current_depth=current_depth + 1,
+                    max_display_depth=max_display_depth
                 )
+                if nested_xml:
+                    parts.append(nested_xml)
 
-            # Add spacing between siblings (but not after last one)
-            if not is_last:
-                lines.append(f"{indent}│")
+            parts.append("</linked_memory>")
 
-        return lines
-    
-    def _format_temporal_info(self, memory: dict) -> str:
-        """Format temporal metadata for a memory."""
-        from utils.timezone_utils import format_datetime, parse_time_string
-
-        temporal_parts = []
-
-        if memory.get('expires_at'):
-            expires_dt = parse_time_string(memory['expires_at'])
-            expiry_date = format_datetime(expires_dt, 'date')
-            temporal_parts.append(f"expires: {expiry_date}")
-
-        if memory.get('happens_at'):
-            happens_dt = parse_time_string(memory['happens_at'])
-            event_date = format_datetime(happens_dt, 'date')
-            temporal_parts.append(f"happens: {event_date}")
-
-        if temporal_parts:
-            return f" *({', '.join(temporal_parts)})*"
-        return ""
+        parts.append("</linked_memories>")
+        return "\n".join(parts)

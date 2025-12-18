@@ -418,28 +418,40 @@ class ExtractionOrchestrator:
         user_id: str
     ) -> Dict[str, Any]:
         """
-        Build memory context from referenced memories.
+        Build memory context from referenced and pinned memories.
 
         Loads memory texts from database for all referenced memory IDs.
-        Only includes memories user explicitly referenced (not surfaced).
+        Also collects pinned memory IDs (8-char) for importance boosting.
 
         Args:
             messages: Chunk messages
             user_id: User ID
 
         Returns:
-            Memory context dict with referenced memory texts (dict format)
+            Memory context dict with:
+            - memory_ids: Full UUIDs of referenced memories
+            - referenced_memory_ids: Sorted full UUIDs (for extraction context)
+            - memory_texts: Dict of {uuid: text}
+            - pinned_short_ids: Deduplicated 8-char IDs for importance boost
+            - mentioned_memory_ids: Full UUIDs for mention_count boost
         """
         referenced_ids = set()
+        pinned_short_ids = set()
 
         for msg in messages:
             metadata = getattr(msg, "metadata", {}) or {}
 
-            # Only extract referenced memories (not surfaced)
+            # Extract referenced memories (explicit LLM references)
             if isinstance(metadata.get("referenced_memories"), list):
                 for ref in metadata["referenced_memories"]:
                     if isinstance(ref, str):
                         referenced_ids.add(ref)
+
+            # Extract pinned memory IDs (8-char short IDs from retention)
+            if isinstance(metadata.get("pinned_memory_ids"), list):
+                for pin_id in metadata["pinned_memory_ids"]:
+                    if isinstance(pin_id, str) and pin_id:
+                        pinned_short_ids.add(pin_id.lower())
 
         # Load memory texts from database
         memory_texts = {}
@@ -451,10 +463,15 @@ class ExtractionOrchestrator:
 
             logger.debug(f"Loaded {len(memories)} referenced memories for context")
 
+        if pinned_short_ids:
+            logger.debug(f"Collected {len(pinned_short_ids)} unique pinned memory IDs")
+
         return {
             "memory_ids": list(referenced_ids),
             "referenced_memory_ids": sorted(referenced_ids),
-            "memory_texts": memory_texts  # Dict format: {uuid: text}
+            "memory_texts": memory_texts,  # Dict format: {uuid: text}
+            "pinned_short_ids": sorted(pinned_short_ids),  # 8-char IDs for pin boost
+            "mentioned_memory_ids": sorted(referenced_ids)  # Full UUIDs for mention boost
         }
 
     @staticmethod

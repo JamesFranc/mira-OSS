@@ -622,16 +622,15 @@ class TestLLMProviderModelSelection:
 class TestCircuitBreaker:
     """Test CircuitBreaker for preventing infinite tool loops."""
 
-    def test_circuit_breaker_initializes_with_max_iterations(self):
-        """Verify CircuitBreaker initializes with correct max_iterations."""
-        breaker = CircuitBreaker(max_iterations=5)
+    def test_circuit_breaker_initializes_empty(self):
+        """Verify CircuitBreaker initializes with empty results."""
+        breaker = CircuitBreaker()
 
-        assert breaker.max_iterations == 5
         assert breaker.tool_results == []
 
     def test_circuit_breaker_allows_first_execution(self):
         """Verify CircuitBreaker allows first tool execution."""
-        breaker = CircuitBreaker(max_iterations=10)
+        breaker = CircuitBreaker()
 
         should_continue, reason = breaker.should_continue()
 
@@ -640,7 +639,7 @@ class TestCircuitBreaker:
 
     def test_circuit_breaker_stops_on_error(self):
         """Verify CircuitBreaker stops when tool execution fails."""
-        breaker = CircuitBreaker(max_iterations=10)
+        breaker = CircuitBreaker()
 
         # Record a tool error
         error = Exception("Tool failed")
@@ -653,7 +652,7 @@ class TestCircuitBreaker:
 
     def test_circuit_breaker_stops_on_repeated_results(self):
         """Verify CircuitBreaker stops when getting repeated identical results."""
-        breaker = CircuitBreaker(max_iterations=10)
+        breaker = CircuitBreaker()
 
         # Record two identical results
         breaker.record_execution("tool_1", result="same result")
@@ -664,23 +663,9 @@ class TestCircuitBreaker:
         assert should_continue is False
         assert "Repeated identical results" in reason
 
-    def test_circuit_breaker_stops_at_max_iterations(self):
-        """Verify CircuitBreaker stops at maximum iterations."""
-        breaker = CircuitBreaker(max_iterations=3)
-
-        # Record max iterations worth of different results
-        breaker.record_execution("tool_1", result="result_1")
-        breaker.record_execution("tool_2", result="result_2")
-        breaker.record_execution("tool_3", result="result_3")
-
-        should_continue, reason = breaker.should_continue()
-
-        assert should_continue is False
-        assert "maximum iterations" in reason
-
     def test_circuit_breaker_allows_different_results(self):
         """Verify CircuitBreaker allows execution with different results."""
-        breaker = CircuitBreaker(max_iterations=10)
+        breaker = CircuitBreaker()
 
         # Record different results
         breaker.record_execution("tool_1", result="result_1")
@@ -690,6 +675,17 @@ class TestCircuitBreaker:
 
         assert should_continue is True
         assert reason == "Continue"
+
+    def test_circuit_breaker_allows_many_different_results(self):
+        """Verify CircuitBreaker allows unlimited tool calls with different results."""
+        breaker = CircuitBreaker()
+
+        # Record many different results - should all continue
+        for i in range(100):
+            breaker.record_execution(f"tool_{i}", result=f"result_{i}")
+            should_continue, reason = breaker.should_continue()
+            assert should_continue is True
+            assert reason == "Continue"
 
 
 class TestLLMProviderMessageValidation:
