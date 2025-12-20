@@ -307,13 +307,13 @@ vault_is_sealed() {
 vault_extract_credential() {
     local cred_type="$1"
 
-    # Debug output in loud mode
+    # Debug output in loud mode (to stderr so it doesn't pollute command substitution)
     if [ "$LOUD_MODE" = true ]; then
-        echo ""
-        echo "DEBUG: Contents of /opt/vault/init-keys.txt:"
-        cat /opt/vault/init-keys.txt
-        echo ""
-        echo "DEBUG: Attempting to extract: $cred_type"
+        echo "" >&2
+        echo "DEBUG: Contents of /opt/vault/init-keys.txt:" >&2
+        cat /opt/vault/init-keys.txt >&2
+        echo "" >&2
+        echo "DEBUG: Attempting to extract: $cred_type" >&2
     fi
 
     grep "$cred_type" /opt/vault/init-keys.txt | awk '{print $NF}'
@@ -971,13 +971,18 @@ elif [ "$OS" = "macos" ]; then
     if [ "$LOUD_MODE" = true ]; then
         print_step "Updating Homebrew..."
         brew update
+        print_step "Adding HashiCorp tap..."
+        brew tap hashicorp/tap
         print_step "Installing dependencies via Homebrew (Python ${PYTHON_VER})..."
-        brew install python@${PYTHON_VER} wget curl postgresql@17 valkey vault
+        brew install python@${PYTHON_VER} wget curl postgresql@17 valkey hashicorp/tap/vault
     else
         (brew update > /dev/null 2>&1) &
         show_progress $! "Updating Homebrew"
 
-        (brew install python@${PYTHON_VER} wget curl postgresql@17 valkey vault > /dev/null 2>&1) &
+        (brew tap hashicorp/tap > /dev/null 2>&1) &
+        show_progress $! "Adding HashiCorp tap"
+
+        (brew install python@${PYTHON_VER} wget curl postgresql@17 valkey hashicorp/tap/vault > /dev/null 2>&1) &
         show_progress $! "Installing dependencies via Homebrew (6 packages)"
     fi
 
@@ -1406,7 +1411,7 @@ elif [ "$OS" = "macos" ]; then
     echo -ne "${DIM}${ARROW}${RESET} Verifying Vault installation... "
     if ! command -v vault &> /dev/null; then
         echo -e "${ERROR}"
-        print_error "Vault installation failed. Please install manually: brew install vault"
+        print_error "Vault installation failed. Please install manually: brew tap hashicorp/tap && brew install hashicorp/tap/vault"
         exit 1
     fi
     echo -e "${CHECKMARK}"
@@ -1584,7 +1589,8 @@ for i in {1..30}; do
         fi
     elif [ "$OS" = "macos" ]; then
         # On macOS, check with pg_isready as current user
-        if pg_isready > /dev/null 2>&1; then
+        # Homebrew PostgreSQL 17 uses versioned command name
+        if pg_isready-17 > /dev/null 2>&1; then
             PG_READY=1
             break
         fi
