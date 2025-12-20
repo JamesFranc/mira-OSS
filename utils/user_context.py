@@ -11,6 +11,7 @@ concurrent operations while working identically for single-threaded use.
 
 import contextvars
 from dataclasses import dataclass
+from enum import Enum
 from typing import Dict, Any, Optional
 
 from pydantic import BaseModel, Field
@@ -107,6 +108,12 @@ def has_user_context() -> bool:
 # AccountTiers - Database-backed tier definitions
 # ============================================================
 
+class LLMProvider(str, Enum):
+    """LLM provider routing type."""
+    ANTHROPIC = "anthropic"  # Direct Anthropic SDK
+    GENERIC = "generic"      # OpenAI-compatible endpoint (Groq, OpenRouter, Ollama, etc.)
+
+
 @dataclass(frozen=True)
 class TierConfig:
     """LLM configuration for a tier."""
@@ -115,6 +122,9 @@ class TierConfig:
     thinking_budget: int
     description: str
     display_order: int
+    provider: LLMProvider = LLMProvider.ANTHROPIC
+    endpoint_url: Optional[str] = None
+    api_key_name: Optional[str] = None
 
 
 # Module-level cache for tiers (loaded once per process)
@@ -134,7 +144,7 @@ def get_account_tiers() -> dict[str, TierConfig]:
     db = PostgresClient('mira_service')
 
     results = db.execute_query(
-        "SELECT name, model, thinking_budget, description, display_order FROM account_tiers ORDER BY display_order"
+        "SELECT name, model, thinking_budget, description, display_order, provider, endpoint_url, api_key_name FROM account_tiers ORDER BY display_order"
     )
 
     _tiers_cache = {
@@ -143,7 +153,10 @@ def get_account_tiers() -> dict[str, TierConfig]:
             model=row['model'],
             thinking_budget=row['thinking_budget'],
             description=row['description'] or '',
-            display_order=row['display_order']
+            display_order=row['display_order'],
+            provider=LLMProvider(row['provider']),
+            endpoint_url=row['endpoint_url'],
+            api_key_name=row['api_key_name']
         )
         for row in results
     }
@@ -188,20 +201,31 @@ class UserPreferences(BaseModel):
 
 def get_user_preferences() -> UserPreferences:
     """
-    Get current user's preferences with context caching.
+    Get current user's preferences with Valkey caching.
 
-    Loads all preferences in a single query on first access,
-    caches for subsequent calls in the request lifecycle.
+    Cache hierarchy:
+    1. Valkey (shared across all contexts - WebSocket, HTTP, etc.)
+    2. Database (source of truth)
+
+    Valkey cache is invalidated on preference updates, ensuring
+    all contexts see changes immediately.
     """
-    user_data = get_current_user()
-    if '_preferences' in user_data:
-        return user_data['_preferences']
+    import json
+    from clients.valkey_client import get_valkey_client
+    from clients.postgres_client import PostgresClient
 
     user_id = get_current_user_id()
+    cache_key = f"user_prefs:{user_id}"
 
-    from clients.postgres_client import PostgresClient
+    # Check Valkey cache first (shared across all contexts)
+    valkey = get_valkey_client()
+    cached = valkey.get(cache_key)
+    if cached:
+        data = json.loads(cached)
+        return UserPreferences(**data)
+
+    # Cache miss - fetch from database
     db = PostgresClient('mira_service')
-
     result = db.execute_single(
         """SELECT timezone, memory_manipulation_enabled, llm_tier, max_tier
            FROM users WHERE id = %s""",
@@ -215,13 +239,15 @@ def get_user_preferences() -> UserPreferences:
         max_tier=result.get('max_tier') or 'balanced',
     )
 
-    update_current_user({'_preferences': prefs})
+    # Cache in Valkey with 5-minute TTL (safety net - invalidation handles freshness)
+    valkey.set(cache_key, prefs.model_dump_json(), ex=300)
+
     return prefs
 
 
 def update_user_preference(field: str, value: Any) -> UserPreferences:
     """
-    Update a single preference field in database and cache.
+    Update a single preference field in database and invalidate cache.
 
     Args:
         field: Preference field name (timezone, llm_tier, etc.)
@@ -236,6 +262,8 @@ def update_user_preference(field: str, value: Any) -> UserPreferences:
     user_id = get_current_user_id()
 
     from clients.postgres_client import PostgresClient
+    from clients.valkey_client import get_valkey_client
+
     db = PostgresClient('mira_service')
 
     db.execute_update(
@@ -243,11 +271,9 @@ def update_user_preference(field: str, value: Any) -> UserPreferences:
         (value, user_id)
     )
 
-    # Invalidate cache and reload
-    current = _user_context.get() or {}
-    if '_preferences' in current:
-        del current['_preferences']
-        _user_context.set(current)
+    # Invalidate Valkey cache - next get_user_preferences() will fetch fresh
+    valkey = get_valkey_client()
+    valkey.delete(f"user_prefs:{user_id}")
 
     return get_user_preferences()
 

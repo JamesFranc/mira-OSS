@@ -46,6 +46,9 @@ class ApiConfig(BaseModel):
     emergency_fallback_model: str = Field(default="qwen3:1.7b", description="Model to use during emergency fallback")
     emergency_fallback_recovery_minutes: int = Field(default=5, description="Minutes to wait before testing Anthropic recovery")
 
+    # Generic provider thinking display (for future K2-Thinking support)
+    show_generic_thinking: bool = Field(default=False, description="Show thinking blocks from generic providers to end user (always kept in history)")
+
     # Fingerprint generation settings (query expansion for memory retrieval)
     analysis_enabled: bool = Field(default=True, description="Enable fingerprint generation for retrieval")
     analysis_endpoint: str = Field(default="https://api.groq.com/openai/v1/chat/completions", description="OpenAI-compatible endpoint for fingerprint generation")

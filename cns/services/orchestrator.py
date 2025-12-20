@@ -272,7 +272,8 @@ class ContinuumOrchestrator:
         invoked_tool_loader = False  # Track if invokeother_tool was called during this turn
 
         # Apply tier-based model and thinking configuration
-        from utils.user_context import get_user_preferences, resolve_tier
+        from utils.user_context import get_user_preferences, resolve_tier, LLMProvider
+        from clients.vault_client import get_api_key
 
         llm_kwargs = {}
         prefs = get_user_preferences()
@@ -284,6 +285,13 @@ class ContinuumOrchestrator:
         else:
             llm_kwargs['thinking_enabled'] = True
             llm_kwargs['thinking_budget'] = tier_config.thinking_budget
+
+        # Provider routing for generic OpenAI-compatible endpoints (Groq, OpenRouter, etc.)
+        if tier_config.provider == LLMProvider.GENERIC:
+            llm_kwargs['endpoint_url'] = tier_config.endpoint_url
+            llm_kwargs['model_override'] = tier_config.model
+            if tier_config.api_key_name:
+                llm_kwargs['api_key_override'] = get_api_key(tier_config.api_key_name)
 
         # Retrieve container_id from Valkey for multi-turn file persistence
         # Only pass container_id if code_execution tool is enabled (Anthropic requirement)
@@ -365,7 +373,12 @@ class ContinuumOrchestrator:
                     stream_callback({"type": "text", "content": event.content})
                     response_text += event.content
                 elif isinstance(event, ThinkingEvent):
-                    stream_callback({"type": "thinking", "content": event.content})
+                    # Filter thinking from generic providers unless config allows
+                    is_generic = llm_kwargs.get('endpoint_url') is not None
+                    if is_generic and not config.api.show_generic_thinking:
+                        pass  # Skip showing to user (still in history)
+                    else:
+                        stream_callback({"type": "thinking", "content": event.content})
                 elif hasattr(event, 'tool_name'):
                     stream_callback({"type": "tool_event", "event": event.type, "tool": event.tool_name})
 

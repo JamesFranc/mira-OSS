@@ -37,6 +37,13 @@
   {
     "dependencies": [],
     "description": "Base class for all tools",
+    "name": "invokeother_tool",
+    "parameters": {},
+    "required_parameters": []
+  },
+  {
+    "dependencies": [],
+    "description": "Base class for all tools",
     "name": "kasa_tool",
     "parameters": {},
     "required_parameters": []

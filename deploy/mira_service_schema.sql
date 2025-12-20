@@ -99,14 +99,17 @@ CREATE TABLE IF NOT EXISTS account_tiers (
     model VARCHAR(100) NOT NULL,
     thinking_budget INT NOT NULL DEFAULT 0,
     description TEXT,
-    display_order INT NOT NULL DEFAULT 0
+    display_order INT NOT NULL DEFAULT 0,
+    provider VARCHAR(20) NOT NULL DEFAULT 'anthropic' CHECK (provider IN ('anthropic', 'generic')),
+    endpoint_url TEXT DEFAULT NULL,
+    api_key_name VARCHAR(50) DEFAULT NULL
 );
 
--- Seed initial tiers
-INSERT INTO account_tiers (name, model, thinking_budget, description, display_order) VALUES
-    ('fast', 'claude-haiku-4-5-20251001', 1024, 'Haiku with quick thinking', 1),
-    ('balanced', 'claude-sonnet-4-5-20250929', 1024, 'Sonnet with light reasoning', 2),
-    ('nuanced', 'claude-opus-4-5-20251101', 8192, 'Opus with nuanced reasoning', 3)
+-- Seed initial tiers: 2 Groq (fast, balanced) + 1 Anthropic (nuanced)
+INSERT INTO account_tiers (name, model, thinking_budget, description, display_order, provider, endpoint_url, api_key_name) VALUES
+    ('fast', 'qwen/qwen3-32b', 0, 'Qwen3 32B via Groq', 1, 'generic', 'https://api.groq.com/openai/v1/chat/completions', 'groq_key'),
+    ('balanced', 'moonshotai/kimi-k2-instruct-0905', 0, 'Kimi K2 via Groq', 2, 'generic', 'https://api.groq.com/openai/v1/chat/completions', 'groq_key'),
+    ('nuanced', 'claude-opus-4-5-20251101', 8192, 'Opus with nuanced reasoning', 3, 'anthropic', NULL, NULL)
 ON CONFLICT (name) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS users (
@@ -127,7 +130,7 @@ CREATE TABLE IF NOT EXISTS users (
     cumulative_activity_days INT DEFAULT 0,
     last_activity_date DATE,
 
-    -- LLM tier preference (fast=Haiku, balanced=Sonnet, nuanced=Opus)
+    -- LLM tier preference (fast=Qwen3, balanced=K2, nuanced=Opus)
     llm_tier VARCHAR(20) NOT NULL DEFAULT 'balanced' REFERENCES account_tiers(name),
     -- Maximum tier this user can access (hierarchical: fast < balanced < nuanced)
     max_tier VARCHAR(20) NOT NULL DEFAULT 'nuanced' REFERENCES account_tiers(name)

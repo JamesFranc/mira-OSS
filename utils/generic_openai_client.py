@@ -150,6 +150,8 @@ class GenericOpenAIClient:
         tools: Optional[List[Dict]] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        thinking_enabled: bool = False,
+        thinking_budget: int = 1024,
         **kwargs
     ) -> GenericOpenAIResponse:
         """
@@ -163,6 +165,8 @@ class GenericOpenAIClient:
             tools: Anthropic-format tool definitions
             max_tokens: Maximum tokens to generate
             temperature: Sampling temperature
+            thinking_enabled: Enable reasoning/thinking for compatible providers
+            thinking_budget: Token budget for thinking (adjusts max_tokens)
             **kwargs: Additional parameters (ignored for compatibility)
 
         Returns:
@@ -176,6 +180,10 @@ class GenericOpenAIClient:
         # Use defaults if not specified
         max_tokens = max_tokens if max_tokens is not None else self.default_max_tokens
         temperature = temperature if temperature is not None else self.default_temperature
+
+        # Adjust max_tokens for thinking if enabled
+        if thinking_enabled:
+            max_tokens = max_tokens + thinking_budget
 
         # Prepare messages with system prompt
         openai_messages = []
@@ -199,6 +207,11 @@ class GenericOpenAIClient:
             openai_tools = self._convert_tools(tools)
             payload["tools"] = openai_tools
             logger.debug(f"Converted {len(tools)} Anthropic tools to {len(openai_tools)} OpenAI tools")
+
+        # Add reasoning for providers that support it (OpenRouter, K2-Thinking)
+        if thinking_enabled:
+            payload["reasoning"] = True
+            logger.debug("Reasoning enabled for generic provider")
 
         # Make HTTP request
         try:
@@ -391,6 +404,18 @@ class GenericOpenAIClient:
             raise ValueError("Invalid OpenAI response: empty message")
 
         content_blocks = []
+
+        # Handle reasoning_details (OpenRouter/K2-Thinking format)
+        # Add before text content to match Anthropic's thinking-first ordering
+        reasoning_details = openai_response.get("reasoning_details") or message.get("reasoning_details")
+        if reasoning_details:
+            reasoning_text = "\n".join(reasoning_details) if isinstance(reasoning_details, list) else str(reasoning_details)
+            content_blocks.append(SimpleNamespace(
+                type="thinking",
+                thinking=reasoning_text,
+                signature=None  # Stub - not validated downstream
+            ))
+            logger.debug(f"Parsed reasoning_details into thinking block ({len(reasoning_text)} chars)")
 
         # Add text content
         if message.get("content"):

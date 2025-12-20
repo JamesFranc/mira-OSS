@@ -662,7 +662,23 @@ class LLMProvider:
             # Validate messages before processing
             self._validate_messages(messages)
 
-            # Route to appropriate handler
+            # Route to generic provider (non-streaming) if endpoint_url specified
+            endpoint_url = kwargs.get('endpoint_url')
+            model_override = kwargs.get('model_override')
+            if endpoint_url:
+                response = self._generate_non_streaming(messages, tools, **kwargs)
+                # Emit text content as TextEvent
+                text = self.extract_text_content(response)
+                if text:
+                    yield TextEvent(content=text)
+                # Emit thinking if present
+                for block in response.content:
+                    if block.type == "thinking":
+                        yield ThinkingEvent(content=block.thinking)
+                yield CompleteEvent(response=response)
+                return
+
+            # Route to appropriate handler (Anthropic streaming)
             if tools and self.tool_repo:
                 yield from self._execute_with_tools(messages, tools, **kwargs)
             else:
@@ -738,13 +754,19 @@ class LLMProvider:
                 # Strip container_upload blocks from messages (Files API not supported)
                 messages = self._strip_container_uploads_from_messages(messages)
 
+                # Forward thinking params to generic client
+                use_thinking = kwargs.get('thinking_enabled', False)
+                thinking_budget = kwargs.get('thinking_budget', self.extended_thinking_budget)
+
                 # Call generic client
                 return generic_client.messages.create(
                     messages=messages,
                     system=system_prompt,
                     tools=generic_tools,
                     max_tokens=self.max_tokens,
-                    temperature=self.temperature
+                    temperature=self.temperature,
+                    thinking_enabled=use_thinking,
+                    thinking_budget=thinking_budget
                 )
 
             # If tools are enabled, reuse streaming pipeline and consume to completion
@@ -797,9 +819,20 @@ class LLMProvider:
             if use_thinking:
                 max_tokens = max_tokens + thinking_budget
 
-            # Filter thinking blocks when thinking is disabled
-            messages_to_send = anthropic_messages if use_thinking else [
-                {**msg, "content": [b for b in msg["content"] if b.get("type") != "thinking"]}
+            # Filter thinking blocks:
+            # - When thinking disabled: strip all thinking blocks
+            # - When thinking enabled: strip only generic provider thinking (signature=None)
+            #   to prevent Anthropic rejecting blocks with invalid signatures
+            def keep_block(block: dict) -> bool:
+                if block.get("type") != "thinking":
+                    return True  # Keep non-thinking blocks
+                if not use_thinking:
+                    return False  # Strip all thinking when disabled
+                # Keep only thinking blocks with valid signatures (from Anthropic)
+                return block.get("signature") is not None
+
+            messages_to_send = [
+                {**msg, "content": [b for b in msg["content"] if keep_block(b)]}
                 if msg.get("role") == "assistant" and isinstance(msg.get("content"), list)
                 else msg
                 for msg in anthropic_messages
@@ -980,9 +1013,20 @@ class LLMProvider:
             if use_thinking:
                 max_tokens = max_tokens + thinking_budget
 
-            # Filter thinking blocks when thinking is disabled
-            messages_to_send = anthropic_messages if use_thinking else [
-                {**msg, "content": [b for b in msg["content"] if b.get("type") != "thinking"]}
+            # Filter thinking blocks:
+            # - When thinking disabled: strip all thinking blocks
+            # - When thinking enabled: strip only generic provider thinking (signature=None)
+            #   to prevent Anthropic rejecting blocks with invalid signatures
+            def keep_block(block: dict) -> bool:
+                if block.get("type") != "thinking":
+                    return True  # Keep non-thinking blocks
+                if not use_thinking:
+                    return False  # Strip all thinking when disabled
+                # Keep only thinking blocks with valid signatures (from Anthropic)
+                return block.get("signature") is not None
+
+            messages_to_send = [
+                {**msg, "content": [b for b in msg["content"] if keep_block(b)]}
                 if msg.get("role") == "assistant" and isinstance(msg.get("content"), list)
                 else msg
                 for msg in anthropic_messages
@@ -1121,8 +1165,10 @@ class LLMProvider:
                 selected_model = self._select_model(last_response)
 
             # Stream LLM response with selected model
+            # Remove model_override from kwargs to avoid duplicate argument
+            stream_kwargs = {k: v for k, v in kwargs.items() if k != 'model_override'}
             response = None
-            for event in self._stream_response(current_messages, tools, model_override=selected_model, **kwargs):
+            for event in self._stream_response(current_messages, tools, model_override=selected_model, **stream_kwargs):
                 if isinstance(event, CompleteEvent):
                     response = event.response
                 else:
