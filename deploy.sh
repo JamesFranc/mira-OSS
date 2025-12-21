@@ -1066,7 +1066,7 @@ elif [ "$OS" = "macos" ]; then
         print_step "Adding HashiCorp tap..."
         brew tap hashicorp/tap
         print_step "Installing dependencies via Homebrew (Python ${PYTHON_VER})..."
-        brew install python@${PYTHON_VER} wget curl postgresql@17 valkey hashicorp/tap/vault
+        brew install python@${PYTHON_VER} wget curl postgresql@17 pgvector valkey hashicorp/tap/vault
     else
         (brew update > /dev/null 2>&1) &
         show_progress $! "Updating Homebrew"
@@ -1074,8 +1074,8 @@ elif [ "$OS" = "macos" ]; then
         (brew tap hashicorp/tap > /dev/null 2>&1) &
         show_progress $! "Adding HashiCorp tap"
 
-        (brew install python@${PYTHON_VER} wget curl postgresql@17 valkey hashicorp/tap/vault > /dev/null 2>&1) &
-        show_progress $! "Installing dependencies via Homebrew (6 packages)"
+        (brew install python@${PYTHON_VER} wget curl postgresql@17 pgvector valkey hashicorp/tap/vault > /dev/null 2>&1) &
+        show_progress $! "Installing dependencies via Homebrew (7 packages)"
     fi
 
     print_info "Playwright will install its own browser dependencies"
