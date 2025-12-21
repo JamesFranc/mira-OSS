@@ -122,7 +122,7 @@ class GenericProviderClient:
         self,
         api_key: str,
         model: str,
-        api_endpoint: str = "https://api.openai.com/v1/chat/completions",
+        api_endpoint: str,
         temperature: float = 0.1,
         max_tokens: int = 1000,
         timeout: int = 60
