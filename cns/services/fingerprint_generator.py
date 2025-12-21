@@ -75,12 +75,15 @@ class FingerprintGenerator:
         with open(user_prompt_path, 'r') as f:
             self.user_prompt_template = f.read()
 
-        # Get API key for LLM endpoint
-        self.api_key = get_api_key(config.analysis_api_key_name)
-        if not self.api_key:
-            raise ValueError(
-                f"API key '{config.analysis_api_key_name}' not found in Vault"
-            )
+        # Get API key for LLM endpoint (None for local providers like Ollama)
+        if config.analysis_api_key_name:
+            self.api_key = get_api_key(config.analysis_api_key_name)
+            if not self.api_key:
+                raise ValueError(
+                    f"API key '{config.analysis_api_key_name}' not found in Vault"
+                )
+        else:
+            self.api_key = None  # Local provider (Ollama) - no API key needed
 
         logger.info(
             f"FingerprintGenerator initialized: {config.analysis_model} @ "
