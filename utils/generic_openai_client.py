@@ -50,6 +50,21 @@ from typing import Dict, List, Any, Optional
 logger = logging.getLogger(__name__)
 
 
+class ToolNotLoadedError(Exception):
+    """
+    Raised when model attempts to use a tool not in the request.
+
+    This exception is raised when a generic provider (e.g., Groq) rejects a tool call
+    because the tool wasn't included in the tools parameter. The LLMProvider catches
+    this and returns a synthetic response that triggers invokeother_tool to load the
+    requested tool.
+    """
+    def __init__(self, tool_name: str, original_message: str):
+        self.tool_name = tool_name
+        self.original_message = original_message
+        super().__init__(f"Tool '{tool_name}' not loaded")
+
+
 class GenericOpenAIResponse:
     """
     Mimics anthropic.types.Message structure for compatibility.
@@ -480,6 +495,15 @@ class GenericOpenAIClient:
                     "Content too large for model context window. "
                     "Reduce the message length or use a model with larger context."
                 )
+
+            # Handle tool validation failures - model tried to use unavailable tool
+            # Groq returns: {"error": {"code": "tool_use_failed", "message": "attempted to call tool 'X' which was not in request.tools"}}
+            if error_code == "tool_use_failed":
+                import re
+                match = re.search(r"attempted to call tool '(\w+)'", error_message)
+                tool_name = match.group(1) if match else "unknown_tool"
+                logger.info(f"Tool '{tool_name}' not loaded - raising ToolNotLoadedError for auto-load handling")
+                raise ToolNotLoadedError(tool_name, error_message)
 
         if status == 401 or status == 403:
             logger.error(f"Generic OpenAI client authentication failed: {status}")

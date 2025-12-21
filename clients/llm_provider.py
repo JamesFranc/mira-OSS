@@ -666,17 +666,75 @@ class LLMProvider:
             endpoint_url = kwargs.get('endpoint_url')
             model_override = kwargs.get('model_override')
             if endpoint_url:
-                response = self._generate_non_streaming(messages, tools, **kwargs)
-                # Emit text content as TextEvent
-                text = self.extract_text_content(response)
-                if text:
-                    yield TextEvent(content=text)
-                # Emit thinking if present
-                for block in response.content:
-                    if block.type == "thinking":
-                        yield ThinkingEvent(content=block.thinking)
-                yield CompleteEvent(response=response)
-                return
+                # Agentic loop for generic providers - keep calling until no tool_calls
+                current_messages = list(messages)  # Copy to avoid mutating original
+
+                while True:
+                    response = self._generate_non_streaming(current_messages, tools, **kwargs)
+
+                    # Emit text content as TextEvent
+                    text = self.extract_text_content(response)
+                    if text:
+                        yield TextEvent(content=text)
+
+                    # Emit thinking if present
+                    for block in response.content:
+                        if block.type == "thinking":
+                            yield ThinkingEvent(content=block.thinking)
+
+                    # Check for tool_use blocks
+                    tool_blocks = [b for b in response.content if b.type == "tool_use"]
+
+                    if not tool_blocks:
+                        # No tools = done, emit final response
+                        yield CompleteEvent(response=response)
+                        return
+
+                    # Execute tools and build messages for next iteration
+                    tool_results = []
+                    for block in tool_blocks:
+                        yield ToolExecutingEvent(
+                            tool_name=block.name,
+                            tool_id=block.id,
+                            arguments=block.input
+                        )
+
+                        if self.tool_repo:
+                            try:
+                                result = self.tool_repo.invoke_tool(block.name, block.input)
+                                result_str = json.dumps(result) if isinstance(result, dict) else str(result)
+                                yield ToolCompletedEvent(tool_name=block.name, tool_id=block.id, result=result_str)
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": block.id,
+                                    "content": result_str
+                                })
+                            except Exception as e:
+                                self.logger.error(f"Tool execution failed for {block.name}: {e}")
+                                yield ToolErrorEvent(tool_name=block.name, tool_id=block.id, error=str(e))
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": block.id,
+                                    "content": f"Error: {e}",
+                                    "is_error": True
+                                })
+
+                    # Build assistant message with tool_use blocks (Anthropic format)
+                    assistant_content = []
+                    for block in response.content:
+                        if block.type == "text":
+                            assistant_content.append({"type": "text", "text": block.text})
+                        elif block.type == "tool_use":
+                            assistant_content.append({
+                                "type": "tool_use",
+                                "id": block.id,
+                                "name": block.name,
+                                "input": block.input
+                            })
+
+                    current_messages.append({"role": "assistant", "content": assistant_content})
+                    current_messages.append({"role": "user", "content": tool_results})
+                    # Loop continues - call API again with tool results
 
             # Route to appropriate handler (Anthropic streaming)
             if tools and self.tool_repo:
@@ -723,7 +781,12 @@ class LLMProvider:
                 self.logger.info(f"Routing to generic OpenAI-compatible endpoint: {endpoint_url} / {model_override}")
 
                 # Create generic client instance (internal utility)
-                from utils.generic_openai_client import GenericOpenAIClient
+                from utils.generic_openai_client import (
+                    GenericOpenAIClient, GenericOpenAIResponse, ToolNotLoadedError
+                )
+
+                # Extract temperature from kwargs if provided, otherwise use default
+                temperature = kwargs.get('temperature', self.temperature)
 
                 generic_client = GenericOpenAIClient(
                     endpoint=endpoint_url,
@@ -731,7 +794,7 @@ class LLMProvider:
                     api_key=api_key_override,  # Optional for local providers like Ollama
                     timeout=self.timeout,
                     max_tokens=self.max_tokens,
-                    temperature=self.temperature
+                    temperature=temperature
                 )
 
                 # Prepare system prompt
@@ -758,16 +821,45 @@ class LLMProvider:
                 use_thinking = kwargs.get('thinking_enabled', False)
                 thinking_budget = kwargs.get('thinking_budget', self.extended_thinking_budget)
 
-                # Call generic client
-                return generic_client.messages.create(
-                    messages=messages,
-                    system=system_prompt,
-                    tools=generic_tools,
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                    thinking_enabled=use_thinking,
-                    thinking_budget=thinking_budget
-                )
+                # Call generic client - handle tool validation errors with auto-load
+                try:
+                    return generic_client.messages.create(
+                        messages=messages,
+                        system=system_prompt,
+                        tools=generic_tools,
+                        max_tokens=self.max_tokens,
+                        temperature=temperature,
+                        thinking_enabled=use_thinking,
+                        thinking_budget=thinking_budget
+                    )
+                except ToolNotLoadedError as e:
+                    # Model tried to use a tool that isn't in the request
+                    # Return synthetic response with invokeother_tool call
+                    # The agentic loop will execute this, load the tool, and continue
+                    import uuid
+                    from types import SimpleNamespace
+
+                    self.logger.info(
+                        f"Tool '{e.tool_name}' not loaded - returning synthetic invokeother_tool call"
+                    )
+
+                    return GenericOpenAIResponse(
+                        content=[
+                            SimpleNamespace(
+                                type="tool_use",
+                                id=f"toolu_{uuid.uuid4().hex[:24]}",
+                                name="invokeother_tool",
+                                input={"mode": "load", "query": e.tool_name}
+                            )
+                        ],
+                        stop_reason="tool_use",
+                        usage={
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 0
+                        }
+                    )
 
             # If tools are enabled, reuse streaming pipeline and consume to completion
             if tools and self.tool_repo:
