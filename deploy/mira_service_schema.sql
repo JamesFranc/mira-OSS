@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS users (
     -- LLM tier preference (fast=Qwen3, balanced=K2, nuanced=Opus)
     llm_tier VARCHAR(20) NOT NULL DEFAULT 'balanced' REFERENCES account_tiers(name),
     -- Maximum tier this user can access (hierarchical: fast < balanced < nuanced)
-    max_tier VARCHAR(20) NOT NULL DEFAULT 'balanced' REFERENCES account_tiers(name)
+    max_tier VARCHAR(20) NOT NULL DEFAULT 'nuanced' REFERENCES account_tiers(name)
 );
 
 -- Grant SELECT on account_tiers to application user
