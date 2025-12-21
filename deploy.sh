@@ -1460,6 +1460,11 @@ if [ "$CONFIG_OFFLINE_MODE" = "yes" ]; then
         sed -i '' 's|execution_endpoint: str = Field(default="https://api.groq.com/openai/v1/chat/completions"|execution_endpoint: str = Field(default="http://localhost:11434/v1/chat/completions"|' /opt/mira/app/config/config.py
         sed -i '' 's|execution_api_key_name: str = Field(default="provider_key"|execution_api_key_name: Optional[str] = Field(default=None|' /opt/mira/app/config/config.py
         sed -i '' "s|execution_model: str = Field(default=\"openai/gpt-oss-20b\"|execution_model: str = Field(default=\"${OLLAMA_MODEL}\"|" /opt/mira/app/config/config.py
+        # Patch database schema - account_tiers for offline mode (endpoint, model, api_key)
+        sed -i '' "s|https://api.groq.com/openai/v1/chat/completions|http://localhost:11434/v1/chat/completions|g" /opt/mira/app/deploy/mira_service_schema.sql
+        sed -i '' "s|'qwen/qwen3-32b'|'${OLLAMA_MODEL}'|g" /opt/mira/app/deploy/mira_service_schema.sql
+        sed -i '' "s|'moonshotai/kimi-k2-instruct-0905'|'${OLLAMA_MODEL}'|g" /opt/mira/app/deploy/mira_service_schema.sql
+        sed -i '' "s|, 'provider_key')|, NULL)|g" /opt/mira/app/deploy/mira_service_schema.sql
     else
         # Patch analysis settings (fingerprint generation, memory evacuation)
         sed -i 's|analysis_endpoint: str = Field(default="https://api.groq.com/openai/v1/chat/completions"|analysis_endpoint: str = Field(default="http://localhost:11434/v1/chat/completions"|' /opt/mira/app/config/config.py
@@ -1469,6 +1474,11 @@ if [ "$CONFIG_OFFLINE_MODE" = "yes" ]; then
         sed -i 's|execution_endpoint: str = Field(default="https://api.groq.com/openai/v1/chat/completions"|execution_endpoint: str = Field(default="http://localhost:11434/v1/chat/completions"|' /opt/mira/app/config/config.py
         sed -i 's|execution_api_key_name: str = Field(default="provider_key"|execution_api_key_name: Optional[str] = Field(default=None|' /opt/mira/app/config/config.py
         sed -i "s|execution_model: str = Field(default=\"openai/gpt-oss-20b\"|execution_model: str = Field(default=\"${OLLAMA_MODEL}\"|" /opt/mira/app/config/config.py
+        # Patch database schema - account_tiers for offline mode (endpoint, model, api_key)
+        sed -i "s|https://api.groq.com/openai/v1/chat/completions|http://localhost:11434/v1/chat/completions|g" /opt/mira/app/deploy/mira_service_schema.sql
+        sed -i "s|'qwen/qwen3-32b'|'${OLLAMA_MODEL}'|g" /opt/mira/app/deploy/mira_service_schema.sql
+        sed -i "s|'moonshotai/kimi-k2-instruct-0905'|'${OLLAMA_MODEL}'|g" /opt/mira/app/deploy/mira_service_schema.sql
+        sed -i "s|, 'provider_key')|, NULL)|g" /opt/mira/app/deploy/mira_service_schema.sql
     fi
     echo -e "${CHECKMARK}"
 fi
