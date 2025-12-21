@@ -538,14 +538,51 @@ OS_TYPE=$(uname -s)
 case "$OS_TYPE" in
     Linux*)
         OS="linux"
+        # Detect Linux distribution family
+        if [ -f /etc/redhat-release ] || [ -f /etc/fedora-release ]; then
+            DISTRO="fedora"
+        elif [ -f /etc/debian_version ]; then
+            DISTRO="debian"
+        else
+            # Fall back to checking /etc/os-release
+            if [ -f /etc/os-release ]; then
+                . /etc/os-release
+                case "$ID" in
+                    fedora|rhel|centos|rocky|alma)
+                        DISTRO="fedora"
+                        ;;
+                    debian|ubuntu|linuxmint|pop)
+                        DISTRO="debian"
+                        ;;
+                    *)
+                        # Check ID_LIKE for derivatives
+                        case "$ID_LIKE" in
+                            *fedora*|*rhel*)
+                                DISTRO="fedora"
+                                ;;
+                            *debian*|*ubuntu*)
+                                DISTRO="debian"
+                                ;;
+                            *)
+                                DISTRO="unknown"
+                                ;;
+                        esac
+                        ;;
+                esac
+            else
+                DISTRO="unknown"
+            fi
+        fi
         ;;
     Darwin*)
         OS="macos"
+        DISTRO=""
         ;;
     *)
         echo ""
         print_error "Unsupported operating system: $OS_TYPE"
-        print_info "This script supports Linux (Ubuntu/Debian) and macOS only."
+        print_info "Supported: Linux (Debian/Ubuntu, Fedora/RHEL/CentOS) and macOS"
+        print_info "For other platforms, see manual installation: docs/MANUAL_INSTALL.md"
         exit 1
         ;;
 esac
@@ -620,7 +657,10 @@ if [ -n "$PORTS_IN_USE" ]; then
                 # PostgreSQL - canonical method per OS
                 echo -ne "${DIM}${ARROW}${RESET} Stopping PostgreSQL (port 5432)... "
                 if [ "$OS" = "linux" ]; then
-                    if check_exists service_systemctl postgresql; then
+                    # Fedora/RHEL uses postgresql-17 service name, Debian uses postgresql
+                    if check_exists service_systemctl postgresql-17; then
+                        stop_service postgresql-17 systemctl && echo -e "${CHECKMARK}" || echo -e "${WARNING}"
+                    elif check_exists service_systemctl postgresql; then
                         stop_service postgresql systemctl && echo -e "${CHECKMARK}" || echo -e "${WARNING}"
                     else
                         stop_service "PostgreSQL" port 5432 && echo -e "${CHECKMARK}" || echo -e "${WARNING}"
@@ -993,7 +1033,22 @@ print_header "System Detection"
 echo -ne "${DIM}${ARROW}${RESET} Detecting operating system... "
 case "$OS" in
     linux)
-        echo -e "${CHECKMARK} ${DIM}Linux (Ubuntu/Debian)${RESET}"
+        case "$DISTRO" in
+            debian)
+                echo -e "${CHECKMARK} ${DIM}Linux (Debian/Ubuntu)${RESET}"
+                ;;
+            fedora)
+                echo -e "${CHECKMARK} ${DIM}Linux (Fedora/RHEL)${RESET}"
+                ;;
+            *)
+                echo -e "${ERROR}"
+                print_error "Unsupported Linux distribution"
+                print_info "Detected: $([ -f /etc/os-release ] && . /etc/os-release && echo "$PRETTY_NAME" || echo "Unknown")"
+                print_info "Supported: Debian/Ubuntu, Fedora/RHEL/CentOS/Rocky/Alma"
+                print_info "For other distros, see manual installation: docs/MANUAL_INSTALL.md"
+                exit 1
+                ;;
+        esac
         ;;
     macos)
         echo -e "${CHECKMARK} ${DIM}macOS${RESET}"
@@ -1037,8 +1092,8 @@ echo ""
 
 print_header "Step 1: System Dependencies"
 
-if [ "$OS" = "linux" ]; then
-    # Add PostgreSQL APT repository for PostgreSQL 17
+if [ "$OS" = "linux" ] && [ "$DISTRO" = "debian" ]; then
+    # Debian/Ubuntu: Add PostgreSQL APT repository for PostgreSQL 17
     if [ ! -f /etc/apt/sources.list.d/pgdg.list ]; then
         run_with_status "Adding PostgreSQL APT repository" \
             bash -c 'sudo apt-get install -y ca-certificates wget > /dev/null 2>&1 && \
@@ -1084,6 +1139,86 @@ if [ "$OS" = "linux" ]; then
             libxcomposite1 > /dev/null 2>&1) &
         show_progress $! "Installing system packages (18 packages)"
     fi
+elif [ "$OS" = "linux" ] && [ "$DISTRO" = "fedora" ]; then
+    # Fedora/RHEL: Add PostgreSQL PGDG repository for PostgreSQL 17
+    if ! rpm -q pgdg-fedora-repo-latest > /dev/null 2>&1 && ! rpm -q pgdg-redhat-repo-latest > /dev/null 2>&1; then
+        if [ -f /etc/fedora-release ]; then
+            run_with_status "Adding PostgreSQL PGDG repository" \
+                sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/F-$(rpm -E %fedora)-x86_64/pgdg-fedora-repo-latest.noarch.rpm
+        else
+            # RHEL/CentOS/Rocky/Alma
+            run_with_status "Adding PostgreSQL PGDG repository" \
+                sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-$(rpm -E %rhel)-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+        fi
+    fi
+
+    # Disable built-in PostgreSQL module to avoid conflicts
+    run_quiet sudo dnf -qy module disable postgresql || true
+
+    if [ "$LOUD_MODE" = true ]; then
+        print_step "Updating package lists..."
+        sudo dnf makecache
+        print_step "Installing system packages..."
+        sudo dnf install -y \
+            @development-tools \
+            python3-devel \
+            python3-pip \
+            libpq-devel \
+            postgresql17-server \
+            postgresql17-contrib \
+            postgresql17-devel \
+            pgvector_17 \
+            unzip \
+            wget \
+            curl \
+            valkey \
+            atk \
+            at-spi2-atk \
+            at-spi2-core \
+            libXcomposite
+    else
+        # Silent mode with progress indicator
+        (sudo dnf makecache > /dev/null 2>&1) &
+        show_progress $! "Updating package lists"
+
+        (sudo dnf install -y \
+            @development-tools python3-devel python3-pip libpq-devel \
+            postgresql17-server postgresql17-contrib postgresql17-devel pgvector_17 \
+            unzip wget curl valkey \
+            atk at-spi2-atk at-spi2-core libXcomposite > /dev/null 2>&1) &
+        show_progress $! "Installing system packages (17 packages)"
+    fi
+
+    # Initialize PostgreSQL database cluster if not already done
+    if [ ! -d /var/lib/pgsql/17/data/base ]; then
+        run_with_status "Initializing PostgreSQL database cluster" \
+            sudo /usr/pgsql-17/bin/postgresql-17-setup initdb
+    fi
+
+    # Configure pg_hba.conf for password authentication (Fedora defaults to ident)
+    PG_HBA="/var/lib/pgsql/17/data/pg_hba.conf"
+    if [ -f "$PG_HBA" ]; then
+        # Check if already configured for scram-sha-256/md5
+        if ! grep -q "^local.*all.*all.*scram-sha-256" "$PG_HBA" 2>/dev/null; then
+            run_with_status "Configuring PostgreSQL authentication (scram-sha-256)" \
+                bash -c "sudo sed -i 's/^local.*all.*all.*ident/local   all             all                                     scram-sha-256/' $PG_HBA && \
+                         sudo sed -i 's/^local.*all.*all.*peer/local   all             all                                     scram-sha-256/' $PG_HBA && \
+                         sudo sed -i 's/^host.*all.*all.*127.0.0.1.*ident/host    all             all             127.0.0.1\\/32            scram-sha-256/' $PG_HBA && \
+                         sudo sed -i 's/^host.*all.*all.*::1.*ident/host    all             all             ::1\\/128                 scram-sha-256/' $PG_HBA"
+        fi
+    fi
+
+    # Enable and start PostgreSQL service
+    run_with_status "Enabling PostgreSQL service" \
+        sudo systemctl enable postgresql-17
+    run_with_status "Starting PostgreSQL service" \
+        sudo systemctl start postgresql-17
+
+    # Enable and start Valkey service
+    run_with_status "Enabling Valkey service" \
+        sudo systemctl enable valkey
+    run_with_status "Starting Valkey service" \
+        sudo systemctl start valkey
 elif [ "$OS" = "macos" ]; then
     # macOS Homebrew package installation
     # Check if Homebrew is installed
@@ -1338,7 +1473,7 @@ if [ "$CONFIG_OFFLINE_MODE" = "yes" ]; then
     echo -e "${CHECKMARK}"
 fi
 
-# Patch provider endpoint if not Groq (after files are copied, before database is created)
+# Patch provider endpoint and model if not Groq (after files are copied, before database is created)
 if [ "$CONFIG_PROVIDER_NAME" != "Groq" ] && [ -n "$CONFIG_PROVIDER_ENDPOINT" ]; then
     echo -ne "${DIM}${ARROW}${RESET} Patching provider endpoint (${CONFIG_PROVIDER_NAME})... "
     if [ "$OS" = "macos" ]; then
@@ -1598,6 +1733,14 @@ if [ "$OS" = "linux" ]; then
         sudo mv vault /usr/local/bin/
 
     run_quiet sudo chmod +x /usr/local/bin/vault
+
+    # Set SELinux context for vault binary on Fedora/RHEL (if SELinux is enabled)
+    if [ "$DISTRO" = "fedora" ] && command -v getenforce &> /dev/null; then
+        if [ "$(getenforce)" != "Disabled" ]; then
+            run_with_status "Setting SELinux context for Vault binary" \
+                sudo chcon -t bin_t /usr/local/bin/vault
+        fi
+    fi
 elif [ "$OS" = "macos" ]; then
     echo -ne "${DIM}${ARROW}${RESET} Verifying Vault installation... "
     if ! command -v vault &> /dev/null; then
@@ -1613,6 +1756,14 @@ run_with_status "Creating Vault directories" \
 
 run_with_status "Setting Vault directory ownership" \
     sudo chown -R $MIRA_USER:$MIRA_GROUP /opt/vault
+
+# Set SELinux context for /opt/vault on Fedora/RHEL (if SELinux is enabled)
+if [ "$OS" = "linux" ] && [ "$DISTRO" = "fedora" ] && command -v getenforce &> /dev/null; then
+    if [ "$(getenforce)" != "Disabled" ]; then
+        run_with_status "Setting SELinux context for Vault directories" \
+            sudo chcon -R -t var_lib_t /opt/vault
+    fi
+fi
 
 echo -ne "${DIM}${ARROW}${RESET} Writing Vault configuration... "
 cat > /opt/vault/config/vault.hcl <<'EOF'
@@ -1773,8 +1924,9 @@ echo -ne "${DIM}${ARROW}${RESET} Waiting for PostgreSQL to be ready... "
 PG_READY=0
 for i in {1..30}; do
     if [ "$OS" = "linux" ]; then
-        # On Linux, check with pg_isready
-        if sudo -u postgres pg_isready > /dev/null 2>&1; then
+        # On Linux, check with pg_isready (Fedora PGDG uses /usr/pgsql-17/bin/)
+        if sudo -u postgres pg_isready > /dev/null 2>&1 || \
+           sudo -u postgres /usr/pgsql-17/bin/pg_isready > /dev/null 2>&1; then
             PG_READY=1
             break
         fi
@@ -1793,8 +1945,13 @@ if [ $PG_READY -eq 0 ]; then
     echo -e "${ERROR}"
     print_error "PostgreSQL did not become ready within 30 seconds"
     if [ "$OS" = "linux" ]; then
-        print_info "Check status: systemctl status postgresql"
-        print_info "Check logs: journalctl -u postgresql -n 50"
+        if [ "$DISTRO" = "fedora" ]; then
+            print_info "Check status: systemctl status postgresql-17"
+            print_info "Check logs: journalctl -u postgresql-17 -n 50"
+        else
+            print_info "Check status: systemctl status postgresql"
+            print_info "Check logs: journalctl -u postgresql -n 50"
+        fi
     elif [ "$OS" = "macos" ]; then
         print_info "Check status: brew services list | grep postgresql"
         print_info "Check logs: brew services info postgresql@17"
@@ -1990,12 +2147,20 @@ if [ "${CONFIG_INSTALL_SYSTEMD}" = "yes" ] && [ "$OS" = "linux" ]; then
 
         # Create systemd service file
         echo -ne "${DIM}${ARROW}${RESET} Creating systemd service file... "
+
+        # Set correct PostgreSQL service name based on distro
+        if [ "$DISTRO" = "fedora" ]; then
+            PG_SERVICE="postgresql-17.service"
+        else
+            PG_SERVICE="postgresql.service"
+        fi
+
         sudo tee /etc/systemd/system/mira.service > /dev/null <<EOF
 [Unit]
 Description=MIRA - AI Assistant with Persistent Memory
 Documentation=https://github.com/taylorsatula/mira-OSS
-Requires=vault.service postgresql.service valkey.service
-After=vault.service postgresql.service valkey.service vault-unseal.service
+Requires=vault.service ${PG_SERVICE} valkey.service
+After=vault.service ${PG_SERVICE} valkey.service vault-unseal.service
 ConditionPathExists=/opt/mira/app/main.py
 
 [Service]
