@@ -463,8 +463,10 @@ vault_put_if_not_exists() {
         return 0
     fi
 
-    run_with_status "Storing secret at $secret_path" \
-        vault kv put "$secret_path" "$@"
+    if ! run_with_status "Storing secret at $secret_path" vault kv put "$secret_path" "$@"; then
+        print_error "Failed to store secret at $secret_path - deployment cannot continue"
+        exit 1
+    fi
 }
 
 # ============================================================================
