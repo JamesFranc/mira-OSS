@@ -187,7 +187,11 @@ async def lifespan(app: FastAPI):
     
     # Pre-initialize expensive singleton resources at startup
     logger.info("Pre-initializing singleton resources...")
-    
+
+    # Preload all Vault secrets into memory cache (prevents token expiration issues)
+    from clients.vault_client import preload_secrets
+    preload_secrets()
+
     # Initialize embeddings provider (loads mdbr-leaf-ir-asym 768d model)
     from clients.hybrid_embeddings_provider import get_hybrid_embeddings_provider
     embeddings_provider = get_hybrid_embeddings_provider()
@@ -499,15 +503,16 @@ def create_app() -> FastAPI:
     app.include_router(data.router, prefix="/v0/api", tags=["data"])
     app.include_router(actions.router, prefix="/v0/api", tags=["actions"])
     app.include_router(tool_config.router, prefix="/v0/api", tags=["tool_config"])
-    app.include_router(federation_api.router, prefix="/v0/api", tags=["federation"])
 
-    # Root endpoint - friendly redirect guidance
+    # Root endpoint - friendly message for self-hosters
     @app.get("/")
     async def root():
         """Guide users to the correct endpoints."""
         return {
             "message": "MIRA is running! To interact with MIRA, use /v0/api/chat or the CLI tool. To check system health, query /v0/api/health"
         }
+
+    app.include_router(federation_api.router, prefix="/v0/api", tags=["federation"])
 
     
     return app
