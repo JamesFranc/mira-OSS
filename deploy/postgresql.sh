@@ -91,6 +91,27 @@ else
     exit 1
 fi
 
+# Configure LLM endpoints for offline mode (use local Ollama)
+if [ "$CONFIG_OFFLINE_MODE" = "yes" ]; then
+    echo -ne "${DIM}${ARROW}${RESET} Configuring LLM endpoints for offline mode (Ollama)... "
+    OFFLINE_SQL="UPDATE account_tiers SET endpoint_url = 'http://localhost:11434/v1/chat/completions', model = 'qwen3:1.7b', api_key_name = NULL WHERE provider = 'generic'; UPDATE internal_llm SET endpoint_url = 'http://localhost:11434/v1/chat/completions', model = 'qwen3:1.7b', api_key_name = NULL WHERE endpoint_url LIKE 'https://%';"
+    if [ "$OS" = "linux" ]; then
+        if sudo -u postgres psql -d mira_service -c "$OFFLINE_SQL" > /dev/null 2>&1; then
+            echo -e "${CHECKMARK}"
+        else
+            echo -e "${ERROR}"
+            print_warning "Failed to configure offline mode - you may need to run manually"
+        fi
+    elif [ "$OS" = "macos" ]; then
+        if psql mira_service -c "$OFFLINE_SQL" > /dev/null 2>&1; then
+            echo -e "${CHECKMARK}"
+        else
+            echo -e "${ERROR}"
+            print_warning "Failed to configure offline mode - you may need to run manually"
+        fi
+    fi
+fi
+
 # Update PostgreSQL passwords if custom password was set
 if [ "$CONFIG_DB_PASSWORD" != "changethisifdeployingpwd" ]; then
     echo -ne "${DIM}${ARROW}${RESET} Updating database passwords... "
