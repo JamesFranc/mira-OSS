@@ -4,6 +4,9 @@
 #
 # Usage: ./deploy/deploy.sh [--loud] [--migrate] [--dry-run]
 #
+# Quick start (downloads and runs):
+#   git clone https://github.com/taylorsatula/mira-OSS.git /tmp/mira-install && /tmp/mira-install/deploy/deploy.sh
+#
 # Options:
 #   --loud     Show verbose output during installation
 #   --migrate  Upgrade existing installation, preserving user data
@@ -25,6 +28,17 @@ set -e
 
 # Get the directory where this script lives
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ============================================================================
+# Bootstrap: Clone repo if running standalone
+# ============================================================================
+# If lib/output.sh doesn't exist, we were likely curl'd standalone - clone the repo
+if [ ! -f "${SCRIPT_DIR}/lib/output.sh" ]; then
+    echo "Cloning MIRA repository..."
+    CLONE_DIR="/tmp/mira-install-$$"
+    git clone --depth 1 https://github.com/taylorsatula/mira-OSS.git "$CLONE_DIR"
+    exec "$CLONE_DIR/deploy/deploy.sh" "$@"
+fi
 
 # Parse arguments
 LOUD_MODE=false
