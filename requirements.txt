@@ -55,6 +55,7 @@ hvac             # HashiCorp Vault client - vault_client.py
 Pillow>=10.0.0   # Image compression - two-tier compression for multimodal messages
 
 # == UTILITIES & HELPERS ==
+PyYAML           # YAML parsing - secrets schema, SOPS configuration
 pydantic         # Data validation - widely used across API models and tools
 python-dateutil  # Date parsing - reminder_tool.py, timezone_utils.py
 pytz             # Timezone handling - timezone_utils.py
