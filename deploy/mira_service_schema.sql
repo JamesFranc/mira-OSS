@@ -152,7 +152,7 @@ CREATE TABLE IF NOT EXISTS users (
     -- LLM tier preference
     llm_tier VARCHAR(20) DEFAULT 'balanced' REFERENCES account_tiers(name),
     -- Maximum tier this user can access (hierarchical: fast < balanced < nuanced)
-    max_tier VARCHAR(20) NOT NULL DEFAULT 'balanced' REFERENCES account_tiers(name),
+    max_tier VARCHAR(20) NOT NULL DEFAULT 'nuanced' REFERENCES account_tiers(name),
 
     -- Donation tracking (suppresses donation banner for 21 days when set)
     last_donated_at TIMESTAMP WITH TIME ZONE

@@ -31,9 +31,8 @@ from utils.colored_logging import setup_colored_root_logging
 
 setup_colored_root_logging(log_level=logging.INFO, fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# Set APScheduler loggers to DEBUG to suppress routine job execution logs
-logging.getLogger('apscheduler.executors.default').setLevel(logging.DEBUG)
-logging.getLogger('apscheduler.scheduler').setLevel(logging.DEBUG)
+# Suppress APScheduler debug noise - only show warnings and above
+logging.getLogger('apscheduler').setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 

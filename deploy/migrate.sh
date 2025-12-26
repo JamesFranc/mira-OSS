@@ -87,7 +87,11 @@ fi
 
 [ "$LOUD_MODE" = true ] && print_info "Running in verbose mode (--loud)"
 
-print_info "Detected: $OS $([ -n \"$DISTRO\" ] && echo \"($DISTRO)\")"
+if [ -n "$DISTRO" ]; then
+    print_info "Detected: $OS ($DISTRO)"
+else
+    print_info "Detected: $OS"
+fi
 echo ""
 
 # ============================================================================

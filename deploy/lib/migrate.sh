@@ -522,7 +522,7 @@ run_psql() {
     if [ "$OS" = "linux" ]; then
         sudo -u postgres psql -d mira_service -tAc "$query" 2>/dev/null
     else
-        psql -U taylut -h localhost -d mira_service -tAc "$query" 2>/dev/null
+        psql -U mira_admin -h localhost -d mira_service -tAc "$query" 2>/dev/null
     fi
 }
 
@@ -1073,7 +1073,14 @@ backup_postgresql_data() {
             return 1
         fi
     else
-        if pg_dump -U mira_admin -h localhost -d mira_service \
+        # Extract database password from Vault backup for authentication
+        local db_password=""
+        if [ -f "${BACKUP_DIR}/vault_database.json" ]; then
+            db_password=$(jq -r '.password // empty' "${BACKUP_DIR}/vault_database.json" 2>/dev/null || echo "")
+        fi
+
+        # Use PGPASSWORD for authentication (avoids interactive prompt)
+        if PGPASSWORD="$db_password" pg_dump -U mira_admin -h localhost -d mira_service \
             --format=custom \
             --no-owner \
             --no-privileges \
@@ -1084,6 +1091,9 @@ backup_postgresql_data() {
         else
             echo -e "${ERROR}"
             print_error "Failed to backup PostgreSQL data"
+            if [ -z "$db_password" ]; then
+                print_info "Database password not found in Vault backup"
+            fi
             return 1
         fi
     fi
@@ -1332,7 +1342,14 @@ restore_postgresql_data() {
             fi
         fi
     else
-        if pg_restore -U mira_admin -h localhost -d mira_service \
+        # Extract database password from Vault backup for authentication
+        local db_password=""
+        if [ -f "${BACKUP_DIR}/vault_database.json" ]; then
+            db_password=$(jq -r '.password // empty' "${BACKUP_DIR}/vault_database.json" 2>/dev/null || echo "")
+        fi
+
+        # Use PGPASSWORD for authentication (avoids interactive prompt)
+        if PGPASSWORD="$db_password" pg_restore -U mira_admin -h localhost -d mira_service \
             --data-only \
             --disable-triggers \
             --single-transaction \
@@ -1340,7 +1357,7 @@ restore_postgresql_data() {
             echo -e "${CHECKMARK}"
         else
             local user_count
-            user_count=$(psql -U mira_admin -h localhost -d mira_service -tAc "SELECT COUNT(*) FROM users" 2>/dev/null || echo "0")
+            user_count=$(PGPASSWORD="$db_password" psql -U mira_admin -h localhost -d mira_service -tAc "SELECT COUNT(*) FROM users" 2>/dev/null || echo "0")
             if [ "$user_count" -gt 0 ]; then
                 echo -e "${CHECKMARK} ${DIM}(with warnings)${RESET}"
             else
