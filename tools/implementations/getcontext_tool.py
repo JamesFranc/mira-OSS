@@ -116,7 +116,7 @@ Be systematic and thorough."""
     def _get_llm_client(self):
         """Get LLM client using tool-specific config."""
         from clients.llm_provider import GenericProviderClient
-        from clients.vault_client import get_api_key
+        from clients.secrets.compat import get_api_key
 
         # Get API key (None for local providers like Ollama)
         if self.config.llm_api_key_name:

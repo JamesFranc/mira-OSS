@@ -8,7 +8,7 @@ and integration scenarios with actual API calls.
 import pytest
 import time
 from utils.prompt_injection_defense import PromptInjectionDefense, TrustLevel
-from clients.vault_client import get_api_key
+from clients.secrets.compat import get_api_key
 
 
 class TestPromptInjectionDefense:

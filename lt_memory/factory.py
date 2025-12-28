@@ -8,7 +8,7 @@ import anthropic
 import logging
 from typing import Optional
 
-from clients.vault_client import get_api_key
+from clients.secrets.compat import get_api_key
 from config.config import (
     LTMemoryConfig,
     ExtractionConfig,

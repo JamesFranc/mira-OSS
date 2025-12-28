@@ -89,31 +89,31 @@ class AppConfig(BaseModel):
     
     @property
     def api_key(self) -> str:
-        """Gets Anthropic API key from Vault."""
-        from clients.vault_client import get_api_key
+        """Gets Anthropic API key from secrets."""
+        from clients.secrets.compat import get_api_key
         return get_api_key(self.api.api_key_name)
-        
-        
+
+
     @property
     def google_maps_api_key(self) -> str:
-        from clients.vault_client import get_api_key
+        from clients.secrets.compat import get_api_key
         return get_api_key('google_maps_api_key')
-        
-    
+
+
     @property
     def embeddings_api_key(self) -> str:
         if self.embeddings.provider == "local":
             return ""
-            
-        from clients.vault_client import get_api_key
+
+        from clients.secrets.compat import get_api_key
         return get_api_key('openai_embeddings_key')
-    
+
     @property
     def lt_memory_api_key(self) -> str:
         if self.lt_memory.llm_provider == "local":
             return ""
-            
-        from clients.vault_client import get_api_key
+
+        from clients.secrets.compat import get_api_key
         return get_api_key(self.lt_memory.llm_api_key_name)
     
     def as_dict(self) -> Dict[str, Any]:

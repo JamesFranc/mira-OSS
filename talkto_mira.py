@@ -32,7 +32,7 @@ from rich.panel import Panel
 from rich.align import Align
 from rich.text import Text
 
-from clients.vault_client import get_api_key
+from clients.secrets.compat import get_api_key
 
 MIRA_API_URL = os.getenv("MIRA_API_URL", "http://localhost:1993")
 REQUEST_TIMEOUT = 120

@@ -9,7 +9,8 @@
 
 # Validate required variables
 : "${OS:?Error: OS must be set}"
-: "${DISTRO:?Error: DISTRO must be set (can be empty for macOS)}"
+# DISTRO can be empty for macOS - use ? instead of :? to allow empty string
+: "${DISTRO?Error: DISTRO must be set (can be empty for macOS)}"
 
 print_header "Step 1: System Dependencies"
 
@@ -156,31 +157,106 @@ elif [ "$OS" = "macos" ]; then
     fi
     echo -e "${CHECKMARK}"
 
-    # Detect Python version to use (newest available, 3.12+ required)
-    PYTHON_VER=$(python3 --version 2>&1 | sed -n 's/Python \([0-9]*\.[0-9]*\).*/\1/p')
+    # Detect Homebrew Python version (prefer modern versions, ignore system Python)
+    PYTHON_VER=""
+    for ver in 3.13 3.12 3.11 3.10; do
+        if [ -f "/opt/homebrew/bin/python${ver}" ] || [ -f "/usr/local/bin/python${ver}" ]; then
+            PYTHON_VER="$ver"
+            break
+        fi
+    done
+
+    # Build package list - only include Python if not already installed
+    BREW_PACKAGES="wget curl postgresql@17 pgvector valkey age sops"
+    if [ -z "$PYTHON_VER" ]; then
+        # No suitable Python found, install Python 3.13
+        BREW_PACKAGES="python@3.13 $BREW_PACKAGES"
+        PYTHON_VER="3.13"
+    fi
 
     if [ "$LOUD_MODE" = true ]; then
         print_step "Updating Homebrew..."
         brew update
-        print_step "Adding HashiCorp tap..."
-        brew tap hashicorp/tap
-        print_step "Installing dependencies via Homebrew (Python ${PYTHON_VER})..."
-        brew install python@${PYTHON_VER} wget curl postgresql@17 pgvector valkey hashicorp/tap/vault
+        print_step "Installing dependencies via Homebrew..."
+        brew install $BREW_PACKAGES
     else
         (brew update > /dev/null 2>&1) &
         show_progress $! "Updating Homebrew"
 
-        (brew tap hashicorp/tap > /dev/null 2>&1) &
-        show_progress $! "Adding HashiCorp tap"
-
-        (brew install python@${PYTHON_VER} wget curl postgresql@17 pgvector valkey hashicorp/tap/vault > /dev/null 2>&1) &
-        show_progress $! "Installing dependencies via Homebrew (7 packages)"
+        # Run brew install with error checking - don't suppress errors completely
+        BREW_LOG=$(mktemp)
+        if ! brew install $BREW_PACKAGES > "$BREW_LOG" 2>&1 & then
+            show_progress $! "Installing dependencies via Homebrew"
+        else
+            show_progress $! "Installing dependencies via Homebrew"
+        fi
+        # Check if any critical packages failed
+        if ! brew list postgresql@17 &>/dev/null; then
+            cat "$BREW_LOG"
+            rm -f "$BREW_LOG"
+            print_error "Failed to install postgresql@17. Check Homebrew output above."
+            exit 1
+        fi
+        rm -f "$BREW_LOG"
     fi
 
     print_info "Playwright will install its own browser dependencies"
 fi
 
 print_success "System dependencies installed"
+
+# Install age and sops for secrets management (Linux only - macOS uses brew)
+if [ "$OS" = "linux" ]; then
+    print_header "Step 1c: Secrets Management Tools"
+
+    # Install age if not present
+    echo -ne "${DIM}${ARROW}${RESET} Checking for age... "
+    if command -v age &> /dev/null; then
+        AGE_VERSION=$(age --version 2>&1 | head -1)
+        echo -e "${CHECKMARK} ${DIM}($AGE_VERSION)${RESET}"
+    else
+        echo -e "${DIM}(not found)${RESET}"
+        AGE_VERSION="1.2.0"
+        AGE_URL="https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-linux-amd64.tar.gz"
+        if [ "$LOUD_MODE" = true ]; then
+            print_step "Installing age v${AGE_VERSION}..."
+            wget -q -O /tmp/age.tar.gz "$AGE_URL"
+            tar -xzf /tmp/age.tar.gz -C /tmp
+            sudo mv /tmp/age/age /usr/local/bin/
+            sudo mv /tmp/age/age-keygen /usr/local/bin/
+            rm -rf /tmp/age /tmp/age.tar.gz
+        else
+            (wget -q -O /tmp/age.tar.gz "$AGE_URL" && \
+             tar -xzf /tmp/age.tar.gz -C /tmp && \
+             sudo mv /tmp/age/age /usr/local/bin/ && \
+             sudo mv /tmp/age/age-keygen /usr/local/bin/ && \
+             rm -rf /tmp/age /tmp/age.tar.gz) &
+            show_progress $! "Installing age v${AGE_VERSION}"
+        fi
+    fi
+
+    # Install sops if not present
+    echo -ne "${DIM}${ARROW}${RESET} Checking for sops... "
+    if command -v sops &> /dev/null; then
+        SOPS_VERSION=$(sops --version 2>&1 | head -1)
+        echo -e "${CHECKMARK} ${DIM}($SOPS_VERSION)${RESET}"
+    else
+        echo -e "${DIM}(not found)${RESET}"
+        SOPS_VERSION="3.9.0"
+        SOPS_URL="https://github.com/getsops/sops/releases/download/v${SOPS_VERSION}/sops-v${SOPS_VERSION}.linux.amd64"
+        if [ "$LOUD_MODE" = true ]; then
+            print_step "Installing sops v${SOPS_VERSION}..."
+            sudo wget -q -O /usr/local/bin/sops "$SOPS_URL"
+            sudo chmod +x /usr/local/bin/sops
+        else
+            (sudo wget -q -O /usr/local/bin/sops "$SOPS_URL" && \
+             sudo chmod +x /usr/local/bin/sops) &
+            show_progress $! "Installing sops v${SOPS_VERSION}"
+        fi
+    fi
+
+    print_success "Secrets management tools installed"
+fi
 
 # Ollama setup (only for offline mode)
 if [ "$CONFIG_OFFLINE_MODE" = "yes" ]; then

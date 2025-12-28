@@ -51,7 +51,7 @@ class PostgresClient:
     def __init__(self, database_name: str, user_id: Optional[str] = None):
         self.database_name = database_name
         self.user_id = user_id
-        from clients.vault_client import get_database_url
+        from clients.secrets.compat import get_database_url
         self._database_url = get_database_url(database_name)
         self._ensure_connection_pool()
     

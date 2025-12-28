@@ -12,7 +12,7 @@ from typing import List, Dict, Any, Set
 
 from config.config import ProactiveConfig
 from cns.core.continuum import Continuum
-from clients.vault_client import get_api_key
+from clients.secrets.compat import get_api_key
 
 logger = logging.getLogger(__name__)
 

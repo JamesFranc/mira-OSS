@@ -290,7 +290,7 @@ class ContinuumOrchestrator:
 
         # Apply tier-based model and thinking configuration
         from utils.user_context import get_user_preferences, resolve_tier, LLMProvider
-        from clients.vault_client import get_api_key
+        from clients.secrets.compat import get_api_key
 
         llm_kwargs = {}
         prefs = get_user_preferences()

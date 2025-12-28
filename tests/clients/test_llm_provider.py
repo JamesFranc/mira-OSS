@@ -23,7 +23,7 @@ from typing import Dict, List, Any
 from unittest.mock import Mock
 
 from clients.llm_provider import LLMProvider, CircuitBreaker
-from clients.vault_client import get_api_key
+from clients.secrets.compat import get_api_key
 from cns.core.stream_events import (
     TextEvent, CompleteEvent, ToolDetectedEvent, ErrorEvent,
     ToolExecutingEvent, ToolCompletedEvent, ToolErrorEvent, CircuitBreakerEvent

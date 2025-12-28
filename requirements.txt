@@ -49,7 +49,6 @@ mcp              # Model Context Protocol SDK - mcp_client.py for MCP server con
 googlemaps       # Google Maps API - maps_tool.py
 kasa             # TP-Link Kasa smart devices - kasa_tool.py
 kagiapi          # Kagi search API - webaccess tools
-hvac             # HashiCorp Vault client - vault_client.py
 
 # == IMAGE PROCESSING ==
 Pillow>=10.0.0   # Image compression - two-tier compression for multimodal messages

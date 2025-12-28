@@ -2,7 +2,7 @@
 # Migration helper functions for MIRA upgrades
 # Source this file - do not execute directly
 #
-# Requires: lib/output.sh, lib/services.sh, lib/vault.sh sourced first
+# Requires: lib/output.sh, lib/services.sh sourced first
 # Requires: OS, LOUD_MODE variables set
 
 # ============================================================================
@@ -127,46 +127,32 @@ verify_postgresql_backup() {
     return 0
 }
 
-verify_vault_backup() {
+verify_secrets_backup() {
     local backup_dir="$1"
 
-    echo -ne "${DIM}${ARROW}${RESET} Verifying Vault backup integrity... "
+    echo -ne "${DIM}${ARROW}${RESET} Verifying secrets backup integrity... "
 
-    local files_valid=0
-    local files_checked=0
-
-    for json_file in "${backup_dir}"/vault_*.json; do
-        [ ! -f "$json_file" ] && continue
-        files_checked=$((files_checked + 1))
-
-        # Verify it's valid JSON
-        if jq -e '.' "$json_file" > /dev/null 2>&1; then
-            files_valid=$((files_valid + 1))
-        else
-            echo -e "${ERROR}"
-            print_error "Invalid JSON in: $(basename "$json_file")"
-            return 1
-        fi
-    done
-
-    # Verify snapshot file exists and is valid
-    if [ -f "${backup_dir}/vault_snapshot.json" ]; then
-        if ! jq -e '.' "${backup_dir}/vault_snapshot.json" > /dev/null 2>&1; then
-            echo -e "${ERROR}"
-            print_error "Vault snapshot is corrupted"
-            return 1
-        fi
-        files_valid=$((files_valid + 1))
-        files_checked=$((files_checked + 1))
-    fi
-
-    if [ "$files_checked" -eq 0 ]; then
+    # Check for secrets.enc.yaml backup
+    if [ ! -f "${backup_dir}/secrets.enc.yaml" ]; then
         echo -e "${WARNING}"
-        print_warning "No Vault backup files found"
+        print_warning "No secrets backup found"
         return 0
     fi
 
-    echo -e "${CHECKMARK} ${DIM}($files_valid/$files_checked files valid)${RESET}"
+    # Verify it's a valid SOPS-encrypted file (has sops metadata)
+    if ! grep -q "sops:" "${backup_dir}/secrets.enc.yaml" 2>/dev/null; then
+        echo -e "${ERROR}"
+        print_error "Secrets backup is not a valid SOPS-encrypted file"
+        return 1
+    fi
+
+    # Check for age key backup
+    if [ ! -f "${backup_dir}/age.key" ]; then
+        echo -e "${WARNING}"
+        print_warning "Age key not backed up - secrets may not be decryptable"
+    fi
+
+    echo -e "${CHECKMARK}"
     return 0
 }
 
@@ -210,7 +196,7 @@ verify_all_backups() {
     local all_valid=true
 
     verify_postgresql_backup "${BACKUP_DIR}/postgresql_backup.dump" || all_valid=false
-    verify_vault_backup "$BACKUP_DIR" || all_valid=false
+    verify_secrets_backup "$BACKUP_DIR" || all_valid=false
     verify_database_backup "$BACKUP_DIR" || all_valid=false
 
     if [ "$all_valid" = true ]; then
@@ -224,272 +210,69 @@ verify_all_backups() {
 }
 
 # ============================================================================
-# Vault Snapshot Functions (Critical for Data Integrity)
+# Secrets Snapshot Functions (Critical for Data Integrity)
 # ============================================================================
-# These functions capture the COMPLETE Vault state and verify it after restore.
-# This guarantees no secrets are lost during migration.
+# These functions capture the SOPS secrets state and verify it after restore.
 
-# Global variable to hold the pre-migration Vault snapshot
-VAULT_SNAPSHOT=""
-
-# Capture complete Vault tree as normalized JSON for comparison
-# This enumerates ALL paths under secret/mira/ and captures every field
-capture_vault_snapshot() {
+# Capture secrets snapshot for comparison
+capture_secrets_snapshot() {
     local snapshot_file="$1"
 
-    echo -ne "${DIM}${ARROW}${RESET} Capturing complete Vault snapshot... "
+    echo -ne "${DIM}${ARROW}${RESET} Capturing secrets snapshot... "
 
-    # Ensure authenticated
-    vault_authenticate > /dev/null 2>&1 || {
-        echo -e "${ERROR}"
-        print_error "Cannot authenticate with Vault for snapshot"
-        return 1
-    }
+    local secrets_file="/opt/mira/app/secrets.enc.yaml"
+    local age_key_file="$HOME/.config/mira/age.key"
 
-    # Start JSON object
-    echo "{" > "$snapshot_file"
-
-    # Get list of all secret paths under secret/mira/
-    local paths
-    paths=$(vault kv list -format=json secret/mira 2>/dev/null | jq -r '.[]' 2>/dev/null || echo "")
-
-    if [ -z "$paths" ]; then
-        # No paths found - might be empty or error
-        echo "  \"_empty\": true" >> "$snapshot_file"
-        echo "}" >> "$snapshot_file"
-        echo -e "${CHECKMARK} ${DIM}(empty vault)${RESET}"
+    if [ ! -f "$secrets_file" ]; then
+        echo -e "${WARNING}"
+        print_warning "No secrets.enc.yaml found"
+        echo '{"_empty": true}' > "$snapshot_file"
         return 0
     fi
 
-    local first=true
-    local path_count=0
-
-    for path in $paths; do
-        # Remove trailing slash if present
-        path="${path%/}"
-
-        # Get the secret data (extract .data.data for KV v2)
-        local secret_data
-        secret_data=$(vault kv get -format=json "secret/mira/${path}" 2>/dev/null | jq -c '.data.data // {}' 2>/dev/null || echo "{}")
-
-        if [ "$first" = true ]; then
-            first=false
-        else
-            echo "," >> "$snapshot_file"
-        fi
-
-        # Write path and its data
-        echo "  \"${path}\": ${secret_data}" >> "$snapshot_file"
-        path_count=$((path_count + 1))
-    done
-
-    echo "" >> "$snapshot_file"
-    echo "}" >> "$snapshot_file"
-
-    # Calculate checksum for quick comparison
-    local checksum
-    if command -v sha256sum &> /dev/null; then
-        checksum=$(jq -cS '.' "$snapshot_file" | sha256sum | cut -d' ' -f1)
+    # Decrypt and capture secrets structure (keys only, not values for security)
+    export SOPS_AGE_KEY_FILE="$age_key_file"
+    if sops -d "$secrets_file" 2>/dev/null | yq -o=json 'keys' > "$snapshot_file" 2>/dev/null; then
+        echo -e "${CHECKMARK}"
     else
-        # macOS uses shasum
-        checksum=$(jq -cS '.' "$snapshot_file" | shasum -a 256 | cut -d' ' -f1)
+        print_error "Cannot decrypt secrets for snapshot"
+        return 1
     fi
 
-    # Store checksum in separate file
-    echo "$checksum" > "${snapshot_file}.sha256"
-
-    echo -e "${CHECKMARK} ${DIM}($path_count paths, checksum: ${checksum:0:12}...)${RESET}"
     return 0
 }
 
-# Verify restored Vault matches the pre-migration snapshot exactly
-# If differences are found, show colored diff and require user confirmation for each
-verify_vault_snapshot() {
-    local original_snapshot="$1"
-    local current_snapshot="${BACKUP_DIR}/vault_current_snapshot.json"
+# Verify secrets file exists and is decryptable
+verify_secrets_restored() {
+    local backup_dir="$1"
 
-    echo -ne "${DIM}${ARROW}${RESET} Verifying Vault integrity... "
+    echo -ne "${DIM}${ARROW}${RESET} Verifying secrets integrity... "
 
-    # Capture current Vault state
-    capture_vault_snapshot "$current_snapshot" > /dev/null 2>&1 || {
+    local secrets_file="/opt/mira/app/secrets.enc.yaml"
+    local age_key_file="$HOME/.config/mira/age.key"
+
+    if [ ! -f "$secrets_file" ]; then
         echo -e "${ERROR}"
-        print_error "Failed to capture current Vault state for comparison"
-        return 1
-    }
-
-    # Compare checksums first (fast path)
-    local original_checksum current_checksum
-    original_checksum=$(cat "${original_snapshot}.sha256" 2>/dev/null || echo "")
-    current_checksum=$(cat "${current_snapshot}.sha256" 2>/dev/null || echo "")
-
-    if [ "$original_checksum" = "$current_checksum" ] && [ -n "$original_checksum" ]; then
-        echo -e "${CHECKMARK} ${DIM}(checksums match: ${original_checksum:0:12}...)${RESET}"
-        return 0
-    fi
-
-    # Checksums differ - do detailed comparison with colored output
-    echo -e "${WARNING}"
-    echo ""
-    echo -e "${BOLD}${YELLOW}════════════════════════════════════════════════════════════${RESET}"
-    echo -e "${BOLD}${YELLOW}  VAULT INTEGRITY CHECK: Differences Detected${RESET}"
-    echo -e "${BOLD}${YELLOW}════════════════════════════════════════════════════════════${RESET}"
-    echo ""
-    echo -e "${DIM}Original checksum: ${original_checksum}${RESET}"
-    echo -e "${DIM}Current checksum:  ${current_checksum}${RESET}"
-    echo ""
-
-    # Compare each path
-    local original_paths current_paths
-    original_paths=$(jq -r 'keys[]' "$original_snapshot" 2>/dev/null | grep -v "^_empty$" | sort)
-    current_paths=$(jq -r 'keys[]' "$current_snapshot" 2>/dev/null | grep -v "^_empty$" | sort)
-
-    local has_differences=false
-    local user_confirmed_all=true
-
-    # Check for missing paths (RED - these are critical)
-    local missing_paths
-    missing_paths=$(comm -23 <(echo "$original_paths") <(echo "$current_paths") 2>/dev/null || echo "")
-    if [ -n "$missing_paths" ] && [ "$missing_paths" != "" ]; then
-        has_differences=true
-        echo -e "${BOLD}${RED}╔══ MISSING SECRET PATHS (were in original, not in restored) ══╗${RESET}"
-        echo "$missing_paths" | while read path; do
-            [ -z "$path" ] && continue
-            echo -e "${RED}  ▸ secret/mira/${path}${RESET}"
-
-            # Show what fields were in this path
-            local fields
-            fields=$(jq -r ".\"$path\" | keys[]" "$original_snapshot" 2>/dev/null || echo "")
-            if [ -n "$fields" ]; then
-                echo -e "${DIM}${RED}    Fields lost: $(echo $fields | tr '\n' ', ' | sed 's/, $//')${RESET}"
-            fi
-        done
-        echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${RESET}"
-        echo ""
-
-        echo -e "${BOLD}${RED}CRITICAL: Missing secrets detected!${RESET}"
-        read -p "$(echo -e ${YELLOW}Acknowledge this data loss and continue anyway?${RESET}) (yes/no): " confirm
-        if [ "$confirm" != "yes" ]; then
-            echo -e "${RED}Migration aborted by user.${RESET}"
-            user_confirmed_all=false
-        fi
-        echo ""
-    fi
-
-    # Check for extra paths (GREEN - unexpected but not critical)
-    local extra_paths
-    extra_paths=$(comm -13 <(echo "$original_paths") <(echo "$current_paths") 2>/dev/null || echo "")
-    if [ -n "$extra_paths" ] && [ "$extra_paths" != "" ]; then
-        has_differences=true
-        echo -e "${BOLD}${GREEN}╔══ EXTRA SECRET PATHS (new in restored, not in original) ══╗${RESET}"
-        echo "$extra_paths" | while read path; do
-            [ -z "$path" ] && continue
-            echo -e "${GREEN}  ▸ secret/mira/${path}${RESET}"
-        done
-        echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${RESET}"
-        echo ""
-
-        read -p "$(echo -e ${YELLOW}Acknowledge extra paths and continue?${RESET}) (yes/no): " confirm
-        if [ "$confirm" != "yes" ]; then
-            echo -e "${RED}Migration aborted by user.${RESET}"
-            user_confirmed_all=false
-        fi
-        echo ""
-    fi
-
-    # Check each common path for field differences
-    local common_paths
-    common_paths=$(comm -12 <(echo "$original_paths") <(echo "$current_paths") 2>/dev/null || echo "")
-
-    if [ -n "$common_paths" ]; then
-        for path in $common_paths; do
-            [ -z "$path" ] && continue
-            [ "$path" = "_empty" ] && continue
-
-            local original_data current_data
-            original_data=$(jq -cS ".\"$path\"" "$original_snapshot" 2>/dev/null)
-            current_data=$(jq -cS ".\"$path\"" "$current_snapshot" 2>/dev/null)
-
-            if [ "$original_data" != "$current_data" ]; then
-                has_differences=true
-
-                echo -e "${BOLD}${YELLOW}╔══ FIELD DIFFERENCES: secret/mira/${path} ══╗${RESET}"
-
-                # Get field lists
-                local original_keys current_keys
-                original_keys=$(echo "$original_data" | jq -r 'keys[]' 2>/dev/null | sort)
-                current_keys=$(echo "$current_data" | jq -r 'keys[]' 2>/dev/null | sort)
-
-                # Missing fields (RED)
-                local missing_fields
-                missing_fields=$(comm -23 <(echo "$original_keys") <(echo "$current_keys") 2>/dev/null || echo "")
-                if [ -n "$missing_fields" ]; then
-                    for field in $missing_fields; do
-                        [ -z "$field" ] && continue
-                        echo -e "${RED}  - ${field} (REMOVED)${RESET}"
-                    done
-                fi
-
-                # Extra fields (GREEN)
-                local extra_fields
-                extra_fields=$(comm -13 <(echo "$original_keys") <(echo "$current_keys") 2>/dev/null || echo "")
-                if [ -n "$extra_fields" ]; then
-                    for field in $extra_fields; do
-                        [ -z "$field" ] && continue
-                        echo -e "${GREEN}  + ${field} (ADDED)${RESET}"
-                    done
-                fi
-
-                # Changed fields (YELLOW)
-                local common_fields
-                common_fields=$(comm -12 <(echo "$original_keys") <(echo "$current_keys") 2>/dev/null || echo "")
-                for field in $common_fields; do
-                    [ -z "$field" ] && continue
-                    local orig_val curr_val
-                    orig_val=$(echo "$original_data" | jq -r ".\"$field\"" 2>/dev/null)
-                    curr_val=$(echo "$current_data" | jq -r ".\"$field\"" 2>/dev/null)
-                    if [ "$orig_val" != "$curr_val" ]; then
-                        # Show that value changed but don't show actual values (sensitive)
-                        local orig_len=${#orig_val}
-                        local curr_len=${#curr_val}
-                        echo -e "${YELLOW}  ~ ${field} (VALUE CHANGED: ${orig_len} chars → ${curr_len} chars)${RESET}"
-                    fi
-                done
-
-                echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${RESET}"
-                echo ""
-
-                read -p "$(echo -e ${YELLOW}Acknowledge changes to secret/mira/${path} and continue?${RESET}) (yes/no): " confirm
-                if [ "$confirm" != "yes" ]; then
-                    echo -e "${RED}Migration aborted by user.${RESET}"
-                    user_confirmed_all=false
-                    break
-                fi
-                echo ""
-            fi
-        done
-    fi
-
-    # Final verdict
-    if [ "$user_confirmed_all" = false ]; then
-        echo ""
-        print_error "Migration aborted due to unconfirmed Vault differences"
-        print_info "Original snapshot preserved at: $original_snapshot"
-        print_info "Backup JSON files available at: ${BACKUP_DIR}/vault_*.json"
+        print_error "Secrets file not found at $secrets_file"
         return 1
     fi
 
-    if [ "$has_differences" = true ]; then
-        echo -e "${BOLD}${GREEN}════════════════════════════════════════════════════════════${RESET}"
-        echo -e "${GREEN}  All Vault differences acknowledged by user${RESET}"
-        echo -e "${BOLD}${GREEN}════════════════════════════════════════════════════════════${RESET}"
-        echo ""
-        return 0
+    if [ ! -f "$age_key_file" ]; then
+        echo -e "${ERROR}"
+        print_error "Age key not found at $age_key_file"
+        return 1
     fi
 
-    # If we get here with different checksums but no detected diffs,
-    # it might be ordering/formatting - warn but don't fail
-    print_warning "Checksums differ but no structural differences detected (may be JSON formatting)"
-    return 0
+    # Try to decrypt and verify structure
+    export SOPS_AGE_KEY_FILE="$age_key_file"
+    if sops -d "$secrets_file" 2>/dev/null | grep -q "providers:" 2>/dev/null; then
+        echo -e "${CHECKMARK}"
+        return 0
+    else
+        echo -e "${ERROR}"
+        print_error "Cannot decrypt secrets file or invalid structure"
+        return 1
+    fi
 }
 
 # ============================================================================
@@ -924,41 +707,33 @@ migrate_check_postgresql_running() {
     return 0
 }
 
-# Check Vault accessibility and secrets
-migrate_check_vault_accessible() {
-    echo -ne "${DIM}${ARROW}${RESET} Checking Vault accessibility... "
+# Check secrets accessibility
+migrate_check_secrets_accessible() {
+    echo -ne "${DIM}${ARROW}${RESET} Checking secrets accessibility... "
 
-    export VAULT_ADDR='http://127.0.0.1:8200'
+    local secrets_file="/opt/mira/app/secrets.enc.yaml"
+    local age_key_file="$HOME/.config/mira/age.key"
 
-    # Check Vault is running
-    if ! curl -s http://127.0.0.1:8200/v1/sys/health > /dev/null 2>&1; then
+    # Check secrets file exists
+    if [ ! -f "$secrets_file" ]; then
         echo -e "${ERROR}"
-        print_error "Vault not accessible at http://127.0.0.1:8200"
-        print_info "Start Vault before migration"
+        print_error "Secrets file not found at $secrets_file"
         return 1
     fi
 
-    # Check Vault is unsealed
-    if vault_is_sealed; then
-        echo -e "${WARNING}"
-        print_warning "Vault is sealed - attempting unseal"
-        vault_unseal || {
-            print_error "Cannot unseal Vault - check /opt/vault/init-keys.txt"
-            return 1
-        }
-        echo -ne "${DIM}${ARROW}${RESET} Re-checking Vault accessibility... "
+    # Check age key exists
+    if [ ! -f "$age_key_file" ]; then
+        echo -e "${ERROR}"
+        print_error "Age key not found at $age_key_file"
+        print_info "Cannot decrypt secrets without age key"
+        return 1
     fi
 
-    # Authenticate and verify secret access
-    vault_authenticate > /dev/null 2>&1 || {
+    # Verify we can decrypt secrets
+    export SOPS_AGE_KEY_FILE="$age_key_file"
+    if ! sops -d "$secrets_file" > /dev/null 2>&1; then
         echo -e "${ERROR}"
-        print_error "Cannot authenticate with Vault"
-        return 1
-    }
-
-    if ! vault kv get secret/mira/api_keys > /dev/null 2>&1; then
-        echo -e "${ERROR}"
-        print_error "Cannot read Vault secrets - authentication issue"
+        print_error "Cannot decrypt secrets file"
         return 1
     fi
 
@@ -978,10 +753,6 @@ migrate_check_disk_space() {
         pg_size=$(psql -U mira_admin -h localhost -d mira_service -tAc "SELECT pg_database_size('mira_service')" 2>/dev/null || echo "0")
     fi
 
-    # Get Vault data size in KB
-    local vault_size_kb
-    vault_size_kb=$(du -sk /opt/vault/data 2>/dev/null | cut -f1 || echo "0")
-
     # Get user data size in KB
     local user_size_kb
     user_size_kb=$(du -sk /opt/mira/app/data/users 2>/dev/null | cut -f1 || echo "0")
@@ -992,7 +763,7 @@ migrate_check_disk_space() {
 
     # Calculate total needed (convert pg_size from bytes to KB)
     local pg_size_kb=$((pg_size / 1024))
-    local total_kb=$((pg_size_kb + vault_size_kb + user_size_kb + app_size_kb))
+    local total_kb=$((pg_size_kb + user_size_kb + app_size_kb))
     local required_kb=$((total_kb * 2))  # 2x for backup headroom
 
     # Get available space at /opt
@@ -1073,10 +844,13 @@ backup_postgresql_data() {
             return 1
         fi
     else
-        # Extract database password from Vault backup for authentication
+        # Extract database password from SOPS secrets for authentication
         local db_password=""
-        if [ -f "${BACKUP_DIR}/vault_database.json" ]; then
-            db_password=$(jq -r '.password // empty' "${BACKUP_DIR}/vault_database.json" 2>/dev/null || echo "")
+        local secrets_file="/opt/mira/app/secrets.enc.yaml"
+        local age_key_file="$HOME/.config/mira/age.key"
+        if [ -f "$secrets_file" ] && [ -f "$age_key_file" ]; then
+            export SOPS_AGE_KEY_FILE="$age_key_file"
+            db_password=$(sops -d "$secrets_file" 2>/dev/null | yq '.database.password // empty' 2>/dev/null || echo "")
         fi
 
         # Use PGPASSWORD for authentication (avoids interactive prompt)
@@ -1092,7 +866,7 @@ backup_postgresql_data() {
             echo -e "${ERROR}"
             print_error "Failed to backup PostgreSQL data"
             if [ -z "$db_password" ]; then
-                print_info "Database password not found in Vault backup"
+                print_info "Database password not found in secrets"
             fi
             return 1
         fi
@@ -1105,45 +879,39 @@ backup_postgresql_data() {
     return 0
 }
 
-# Backup Vault secrets to JSON files
-backup_vault_secrets() {
-    echo -ne "${DIM}${ARROW}${RESET} Backing up Vault secrets... "
+# Backup SOPS secrets file and age key
+backup_secrets() {
+    echo -ne "${DIM}${ARROW}${RESET} Backing up secrets... "
 
-    # Ensure authenticated
-    vault_authenticate > /dev/null 2>&1 || {
-        echo -e "${ERROR}"
-        print_error "Cannot authenticate with Vault for backup"
-        return 1
-    }
+    local secrets_file="/opt/mira/app/secrets.enc.yaml"
+    local age_key_file="$HOME/.config/mira/age.key"
+    local sops_config="/opt/mira/app/.sops.yaml"
 
     local success=true
 
-    # Export each secret path to JSON
-    # The .data.data path extracts the actual secret data from KV v2 response
-    if vault kv get -format=json secret/mira/api_keys 2>/dev/null | jq '.data.data' > "${BACKUP_DIR}/vault_api_keys.json"; then
-        :
+    # Backup encrypted secrets file
+    if [ -f "$secrets_file" ]; then
+        cp "$secrets_file" "${BACKUP_DIR}/secrets.enc.yaml"
+        chmod 600 "${BACKUP_DIR}/secrets.enc.yaml"
     else
-        print_warning "No api_keys secret found (may be okay for offline mode)"
-    fi
-
-    if vault kv get -format=json secret/mira/database 2>/dev/null | jq '.data.data' > "${BACKUP_DIR}/vault_database.json"; then
-        :
-    else
-        echo -e "${ERROR}"
-        print_error "Cannot backup database credentials"
+        echo -e "${WARNING}"
+        print_warning "No secrets.enc.yaml found"
         success=false
     fi
 
-    if vault kv get -format=json secret/mira/services 2>/dev/null | jq '.data.data' > "${BACKUP_DIR}/vault_services.json"; then
-        :
+    # Backup age key (critical for decryption)
+    if [ -f "$age_key_file" ]; then
+        cp "$age_key_file" "${BACKUP_DIR}/age.key"
+        chmod 600 "${BACKUP_DIR}/age.key"
     else
-        print_warning "No services secret found"
+        echo -e "${ERROR}"
+        print_error "Age key not found - secrets cannot be restored without it"
+        success=false
     fi
 
-    if vault kv get -format=json secret/mira/auth 2>/dev/null | jq '.data.data' > "${BACKUP_DIR}/vault_auth.json"; then
-        :
-    else
-        print_warning "No auth secret found (credential encryption key may be missing)"
+    # Backup SOPS config
+    if [ -f "$sops_config" ]; then
+        cp "$sops_config" "${BACKUP_DIR}/.sops.yaml"
     fi
 
     if [ "$success" = true ]; then
@@ -1179,26 +947,6 @@ backup_user_data_files() {
     return 0
 }
 
-# Backup Vault init keys for emergency recovery
-backup_vault_init_keys() {
-    echo -ne "${DIM}${ARROW}${RESET} Backing up Vault init keys... "
-
-    if [ -f "/opt/vault/init-keys.txt" ]; then
-        cp /opt/vault/init-keys.txt "${BACKUP_DIR}/init-keys.txt"
-        chmod 600 "${BACKUP_DIR}/init-keys.txt"
-        echo -e "${CHECKMARK}"
-    else
-        echo -e "${WARNING}"
-        print_warning "No init-keys.txt found (Vault may not be initialized)"
-    fi
-
-    # Also backup role-id and secret-id if they exist
-    [ -f "/opt/vault/role-id.txt" ] && cp /opt/vault/role-id.txt "${BACKUP_DIR}/"
-    [ -f "/opt/vault/secret-id.txt" ] && cp /opt/vault/secret-id.txt "${BACKUP_DIR}/"
-
-    return 0
-}
-
 # Create backup manifest with metadata
 create_backup_manifest() {
     echo -ne "${DIM}${ARROW}${RESET} Creating backup manifest... "
@@ -1209,20 +957,21 @@ create_backup_manifest() {
     local pg_version
     pg_version=$(psql --version 2>/dev/null | head -1 || echo "unknown")
 
-    local vault_version
-    vault_version=$(vault version 2>/dev/null | head -1 || echo "unknown")
+    local sops_version
+    sops_version=$(sops --version 2>/dev/null | head -1 || echo "unknown")
 
     cat > "${BACKUP_DIR}/manifest.json" <<EOF
 {
     "backup_timestamp": "${BACKUP_TIMESTAMP}",
     "mira_version": "${mira_version}",
     "postgresql_version": "${pg_version}",
-    "vault_version": "${vault_version}",
+    "sops_version": "${sops_version}",
     "os": "${OS}",
     "contents": {
         "postgresql_backup": "postgresql_backup.dump",
-        "vault_secrets": ["vault_api_keys.json", "vault_database.json", "vault_services.json", "vault_auth.json"],
-        "vault_init": "init-keys.txt",
+        "secrets": "secrets.enc.yaml",
+        "age_key": "age.key",
+        "sops_config": ".sops.yaml",
         "user_data": "user_data/"
     }
 }
@@ -1236,74 +985,52 @@ EOF
 # Restore Functions
 # ============================================================================
 
-# Restore Vault secrets from JSON backups
-restore_vault_secrets() {
-    echo -ne "${DIM}${ARROW}${RESET} Restoring Vault secrets... "
+# Restore SOPS secrets from backup
+restore_secrets() {
+    echo -ne "${DIM}${ARROW}${RESET} Restoring secrets... "
 
-    # Ensure authenticated with fresh Vault
-    vault_authenticate > /dev/null 2>&1 || {
-        echo -e "${ERROR}"
-        print_error "Cannot authenticate with new Vault"
-        return 1
-    }
+    local secrets_file="/opt/mira/app/secrets.enc.yaml"
+    local age_key_dir="$HOME/.config/mira"
+    local age_key_file="$age_key_dir/age.key"
+    local sops_config="/opt/mira/app/.sops.yaml"
 
     local success=true
 
-    # Restore each secret from JSON backup
-    # vault kv put accepts @file syntax for JSON input
-    if [ -f "${BACKUP_DIR}/vault_api_keys.json" ] && [ -s "${BACKUP_DIR}/vault_api_keys.json" ]; then
-        if ! vault kv put secret/mira/api_keys @"${BACKUP_DIR}/vault_api_keys.json" > /dev/null 2>&1; then
-            # Try alternative format - some vault versions need different syntax
-            local json_content=$(cat "${BACKUP_DIR}/vault_api_keys.json")
-            if [ "$json_content" != "null" ]; then
-                echo "$json_content" | vault kv put secret/mira/api_keys - > /dev/null 2>&1 || {
-                    print_warning "Could not restore api_keys - may need manual configuration"
-                }
-            fi
-        fi
-    fi
-
-    if [ -f "${BACKUP_DIR}/vault_database.json" ] && [ -s "${BACKUP_DIR}/vault_database.json" ]; then
-        if ! vault kv put secret/mira/database @"${BACKUP_DIR}/vault_database.json" > /dev/null 2>&1; then
-            local json_content=$(cat "${BACKUP_DIR}/vault_database.json")
-            if [ "$json_content" != "null" ]; then
-                echo "$json_content" | vault kv put secret/mira/database - > /dev/null 2>&1 || {
-                    print_error "Could not restore database credentials"
-                    success=false
-                }
-            fi
-        fi
-    fi
-
-    if [ -f "${BACKUP_DIR}/vault_services.json" ] && [ -s "${BACKUP_DIR}/vault_services.json" ]; then
-        if ! vault kv put secret/mira/services @"${BACKUP_DIR}/vault_services.json" > /dev/null 2>&1; then
-            local json_content=$(cat "${BACKUP_DIR}/vault_services.json")
-            if [ "$json_content" != "null" ]; then
-                echo "$json_content" | vault kv put secret/mira/services - > /dev/null 2>&1 || {
-                    print_warning "Could not restore services config"
-                }
-            fi
-        fi
-    fi
-
-    # auth secrets are critical for user data decryption
-    if [ -f "${BACKUP_DIR}/vault_auth.json" ] && [ -s "${BACKUP_DIR}/vault_auth.json" ]; then
-        if ! vault kv put secret/mira/auth @"${BACKUP_DIR}/vault_auth.json" > /dev/null 2>&1; then
-            local json_content=$(cat "${BACKUP_DIR}/vault_auth.json")
-            if [ "$json_content" != "null" ]; then
-                echo "$json_content" | vault kv put secret/mira/auth - > /dev/null 2>&1 || {
-                    print_warning "Could not restore auth secrets - user data may be inaccessible"
-                }
-            fi
-        fi
-    fi
-
-    if [ "$success" = true ]; then
-        echo -e "${CHECKMARK}"
+    # Restore age key first (needed for decryption)
+    if [ -f "${BACKUP_DIR}/age.key" ]; then
+        mkdir -p "$age_key_dir"
+        cp "${BACKUP_DIR}/age.key" "$age_key_file"
+        chmod 600 "$age_key_file"
     else
+        echo -e "${ERROR}"
+        print_error "Age key backup not found - cannot restore secrets"
         return 1
     fi
 
+    # Restore encrypted secrets file
+    if [ -f "${BACKUP_DIR}/secrets.enc.yaml" ]; then
+        cp "${BACKUP_DIR}/secrets.enc.yaml" "$secrets_file"
+        chmod 600 "$secrets_file"
+    else
+        echo -e "${ERROR}"
+        print_error "Secrets backup not found"
+        return 1
+    fi
+
+    # Restore SOPS config if present
+    if [ -f "${BACKUP_DIR}/.sops.yaml" ]; then
+        cp "${BACKUP_DIR}/.sops.yaml" "$sops_config"
+    fi
+
+    # Verify we can decrypt the restored secrets
+    export SOPS_AGE_KEY_FILE="$age_key_file"
+    if ! sops -d "$secrets_file" > /dev/null 2>&1; then
+        echo -e "${ERROR}"
+        print_error "Cannot decrypt restored secrets - key mismatch?"
+        return 1
+    fi
+
+    echo -e "${CHECKMARK}"
     return 0
 }
 
@@ -1342,10 +1069,13 @@ restore_postgresql_data() {
             fi
         fi
     else
-        # Extract database password from Vault backup for authentication
+        # Extract database password from SOPS secrets for authentication
         local db_password=""
-        if [ -f "${BACKUP_DIR}/vault_database.json" ]; then
-            db_password=$(jq -r '.password // empty' "${BACKUP_DIR}/vault_database.json" 2>/dev/null || echo "")
+        local secrets_file="/opt/mira/app/secrets.enc.yaml"
+        local age_key_file="$HOME/.config/mira/age.key"
+        if [ -f "$secrets_file" ] && [ -f "$age_key_file" ]; then
+            export SOPS_AGE_KEY_FILE="$age_key_file"
+            db_password=$(sops -d "$secrets_file" 2>/dev/null | yq '.database.password // empty' 2>/dev/null || echo "")
         fi
 
         # Use PGPASSWORD for authentication (avoids interactive prompt)
@@ -1410,17 +1140,26 @@ restore_user_data_files() {
 # Verification Functions
 # ============================================================================
 
-# Verify Vault secrets are accessible
-verify_vault_secrets() {
-    echo -ne "${DIM}${ARROW}${RESET} Verifying Vault secrets... "
+# Verify secrets are accessible
+verify_secrets_accessible() {
+    echo -ne "${DIM}${ARROW}${RESET} Verifying secrets... "
 
-    if vault kv get secret/mira/api_keys > /dev/null 2>&1 || \
-       vault kv get secret/mira/database > /dev/null 2>&1; then
+    local secrets_file="/opt/mira/app/secrets.enc.yaml"
+    local age_key_file="$HOME/.config/mira/age.key"
+
+    if [ ! -f "$secrets_file" ] || [ ! -f "$age_key_file" ]; then
+        echo -e "${ERROR}"
+        print_error "Secrets files missing after migration"
+        return 1
+    fi
+
+    export SOPS_AGE_KEY_FILE="$age_key_file"
+    if sops -d "$secrets_file" > /dev/null 2>&1; then
         echo -e "${CHECKMARK}"
         return 0
     else
         echo -e "${ERROR}"
-        print_error "Cannot access Vault secrets after migration"
+        print_error "Cannot decrypt secrets after migration"
         return 1
     fi
 }

@@ -19,7 +19,7 @@ class OpenAIEmbeddingModel:
     def __init__(self, api_key: str = None, model: str = "text-embedding-3-small"):
         try:
             if api_key is None:
-                from clients.vault_client import get_api_key
+                from clients.secrets.compat import get_api_key
                 api_key = get_api_key('openai_embeddings_key')
             
             self.api_key = api_key

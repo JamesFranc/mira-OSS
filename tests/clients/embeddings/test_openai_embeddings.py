@@ -7,12 +7,12 @@ Following MIRA testing philosophy: no mocks, test real API behavior.
 import pytest
 import numpy as np
 from clients.embeddings.openai_embeddings import OpenAIEmbeddingModel
-from clients.vault_client import get_api_key
+from clients.secrets.compat import get_api_key
 
 
 @pytest.fixture(scope="module")
 def api_key():
-    """Get OpenAI API key from Vault."""
+    """Get OpenAI API key from secrets."""
     return get_api_key('openai_embeddings_key')
 
 
@@ -62,9 +62,9 @@ class TestOpenAIEmbeddingModelInitialization:
         """Verify get_dimension() returns configured dimension."""
         assert model_small.get_dimension() == 1024
 
-    def test_initialize_without_api_key_uses_vault(self):
-        """Verify initialization without api_key fetches from Vault."""
-        # Should fetch from vault_client.get_api_key('openai_embeddings_key')
+    def test_initialize_without_api_key_uses_secrets(self):
+        """Verify initialization without api_key fetches from secrets."""
+        # Should fetch from secrets.compat.get_api_key('openai_embeddings_key')
         model = OpenAIEmbeddingModel(model="text-embedding-3-small")
 
         assert model.api_key is not None

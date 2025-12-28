@@ -72,15 +72,16 @@ def reset_singletons():
 
 
     try:
-        # Reset Vault client singleton and cache
-        import clients.vault_client
-        if hasattr(clients.vault_client, '_vault_client_instance'):
-            clients.vault_client._vault_client_instance = None
-        if hasattr(clients.vault_client, '_secret_cache'):
-            clients.vault_client._secret_cache.clear()
-        logger.debug("Vault client singleton and cache reset")
+        # Reset secrets backend singleton and cache
+        import clients.secrets
+        import clients.secrets.compat
+        if hasattr(clients.secrets, '_secrets_backend'):
+            clients.secrets._secrets_backend = None
+        if hasattr(clients.secrets.compat, '_secret_cache'):
+            clients.secrets.compat._secret_cache.clear()
+        logger.debug("Secrets backend singleton and cache reset")
     except Exception as e:
-        logger.warning(f"Error resetting Vault client: {e}")
+        logger.warning(f"Error resetting secrets backend: {e}")
 
 
 def force_garbage_collection():

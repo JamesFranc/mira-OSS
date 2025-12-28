@@ -923,8 +923,8 @@ class TestGetContextToolErrorHandling:
     def test_llm_api_failure_handling(self, mock_tool_repo, mock_working_memory, user_context):
         """Test handling of LLM API failures."""
         # Create tool with invalid API configuration
-        # Note: get_api_key is imported inside the _get_llm_client method, so we patch it in vault_client
-        with patch('clients.vault_client.get_api_key') as mock_get_key:
+        # Note: get_api_key is imported inside the _get_llm_client method, so we patch it in secrets.compat
+        with patch('clients.secrets.compat.get_api_key') as mock_get_key:
             mock_get_key.return_value = "invalid_key_123"
 
             tool = GetContextTool(
@@ -983,11 +983,11 @@ class TestGetContextToolErrorHandling:
             assert timeout_events[0].context['elapsed'] > 2.0
             logger.info(f"Timed out after {timeout_events[0].context['elapsed']}s")
 
-    def test_missing_vault_key_handling(self, mock_tool_repo, mock_working_memory, user_context):
-        """Test handling when Vault API key is missing."""
-        # Patch at the vault_client module level since import happens inside the method
-        with patch('clients.vault_client.get_api_key') as mock_get_key:
-            mock_get_key.side_effect = FileNotFoundError("Key not found in Vault")
+    def test_missing_secrets_key_handling(self, mock_tool_repo, mock_working_memory, user_context):
+        """Test handling when secrets API key is missing."""
+        # Patch at the secrets.compat module level since import happens inside the method
+        with patch('clients.secrets.compat.get_api_key') as mock_get_key:
+            mock_get_key.side_effect = KeyError("Key not found in secrets")
 
             tool = GetContextTool(
                 tool_repo=mock_tool_repo,

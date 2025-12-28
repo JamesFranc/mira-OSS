@@ -116,18 +116,19 @@ def ensure_single_user(app: FastAPI) -> None:
             prepopulate_user_domaindoc(user_id)
             logger.info(f"Prepopulated domaindoc for user {user_id}")
 
-            api_key = f"mira_{secrets.token_urlsafe(32)}"
-
+            # Get API key from secrets (fail-fast if not configured)
+            from clients.secrets.compat import get_api_key
             try:
-                from clients.vault_client import _ensure_vault_client
-                vault_client = _ensure_vault_client()
-                # Use patch to add mira_api without overwriting anthropic_key/provider_key
-                vault_client.client.secrets.kv.v2.patch(
-                    path='mira/api_keys',
-                    secret=dict(mira_api=api_key)
-                )
-            except Exception as e:
-                logger.warning(f"Could not store key in Vault: {e}")
+                api_key = get_api_key('mira_api')
+            except KeyError:
+                # Generate a key and show instructions for adding to secrets
+                api_key = f"mira_{secrets.token_urlsafe(32)}"
+                print(f"\n{'='*60}")
+                print("SETUP REQUIRED: Add this API key to your secrets file:")
+                print(f"  auth.mira_api: {api_key}")
+                print(f"\nRun: python scripts/secrets_cli.py edit")
+                print(f"{'='*60}\n")
+                sys.exit(1)
 
             app.state.single_user_id = user_id
             app.state.user_email = default_email
@@ -151,18 +152,18 @@ def ensure_single_user(app: FastAPI) -> None:
         app.state.user_email = user['email']
 
         try:
-            from clients.vault_client import _ensure_vault_client
-            vault_client = _ensure_vault_client()
-            secret_data = vault_client.client.secrets.kv.v2.read_secret_version(
-                path='mira/api_keys'
-            )
-            api_key = secret_data['data']['data'].get('mira_api')
+            from clients.secrets.compat import get_api_key
+            api_key = get_api_key('mira_api')
             app.state.api_key = api_key
-
             print(f"\nMIRA Ready - User: {user['email']}\n")
+        except KeyError:
+            logger.error("MIRA API key not found in secrets")
+            print("\nERROR: auth.mira_api not found in secrets.enc.yaml")
+            print("Run: python scripts/secrets_cli.py edit")
+            sys.exit(1)
         except Exception as e:
-            logger.error(f"Failed to retrieve API key from Vault: {e}")
-            print("\nERROR: Could not retrieve API key from Vault")
+            logger.error(f"Failed to retrieve API key: {e}")
+            print(f"\nERROR: Could not retrieve API key: {e}")
             sys.exit(1)
 
 
@@ -187,8 +188,8 @@ async def lifespan(app: FastAPI):
     # Pre-initialize expensive singleton resources at startup
     logger.info("Pre-initializing singleton resources...")
 
-    # Preload all Vault secrets into memory cache (prevents token expiration issues)
-    from clients.vault_client import preload_secrets
+    # Initialize SOPS secrets backend (fail-fast on missing/invalid secrets)
+    from clients.secrets.compat import preload_secrets
     preload_secrets()
 
     # Initialize embeddings provider (loads mdbr-leaf-ir-asym 768d model)
@@ -289,11 +290,11 @@ async def lifespan(app: FastAPI):
     boot_thread.start()
     logger.info("Boot extraction started in background thread (non-blocking, will auto-terminate)")
 
-    # Verify Vault connection (non-blocking)
-    from clients.vault_client import test_vault_connection
-    vault_status = test_vault_connection()
-    if vault_status["status"] != "success":
-        logger.warning(f"Vault connection issue: {vault_status['message']}")
+    # Verify secrets backend (non-blocking)
+    from clients.secrets.compat import test_vault_connection
+    secrets_status = test_vault_connection()
+    if secrets_status["status"] != "success":
+        logger.warning(f"Secrets backend issue: {secrets_status['message']}")
 
     # Register Lattice username resolver for federation
     # This allows Lattice to resolve usernames to user_ids for inbound message delivery

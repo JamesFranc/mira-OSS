@@ -13,59 +13,23 @@ print_header "Step 15: MIRA CLI Setup"
 
 echo -ne "${DIM}${ARROW}${RESET} Creating mira wrapper script... "
 
-# Create mira wrapper script that sets Vault environment variables
+# Create mira wrapper script
 cat > /opt/mira/mira.sh <<'WRAPPER_EOF'
 #!/bin/bash
-# MIRA CLI wrapper - sets Vault environment variables for talkto_mira.py
+# MIRA CLI wrapper - launches talkto_mira.py with proper environment
 
 # Save original directory
 ORIGINAL_DIR="$(pwd)"
 
-# Set Vault address
-export VAULT_ADDR='http://127.0.0.1:8200'
+# Set SOPS age key path for secrets decryption
+export SOPS_AGE_KEY_FILE="$HOME/.config/mira/age.key"
 
-# Check if Vault is running and accessible
-if ! curl -s http://127.0.0.1:8200/v1/sys/health > /dev/null 2>&1; then
-    echo "Error: Vault is not running at $VAULT_ADDR"
-    echo "Start Vault first:"
-    echo "  Linux: sudo systemctl start vault"
-    echo "  macOS: vault server -config=/opt/vault/config/vault.hcl &"
+# Verify age key exists
+if [ ! -f "$SOPS_AGE_KEY_FILE" ]; then
+    echo "Error: Age key not found at $SOPS_AGE_KEY_FILE"
+    echo "Run 'python scripts/secrets_cli.py init' to create secrets configuration"
     exit 1
 fi
-
-# Check if Vault is sealed and auto-unseal if needed
-# vault status exit codes: 0=unsealed, 2=sealed, 1=error
-vault status > /dev/null 2>&1
-VAULT_STATUS=$?
-
-if [ $VAULT_STATUS -eq 2 ]; then
-    echo "Vault is sealed. Attempting to unseal..."
-    if [ -f /opt/vault/init-keys.txt ]; then
-        UNSEAL_KEY=$(grep 'Unseal Key 1:' /opt/vault/init-keys.txt | awk '{print $NF}')
-        if [ -n "$UNSEAL_KEY" ]; then
-            if vault operator unseal "$UNSEAL_KEY" > /dev/null 2>&1; then
-                echo "Vault unsealed successfully."
-            else
-                echo "Error: Failed to unseal Vault"
-                exit 1
-            fi
-        else
-            echo "Error: Could not extract unseal key from /opt/vault/init-keys.txt"
-            exit 1
-        fi
-    else
-        echo "Error: Vault init-keys.txt not found at /opt/vault/init-keys.txt"
-        echo "Run /opt/vault/unseal.sh manually or check Vault configuration."
-        exit 1
-    fi
-elif [ $VAULT_STATUS -eq 1 ]; then
-    echo "Error: Could not determine Vault status"
-    exit 1
-fi
-
-# Set Vault credentials (files contain just the raw value)
-export VAULT_ROLE_ID=$(cat /opt/vault/role-id.txt)
-export VAULT_SECRET_ID=$(cat /opt/vault/secret-id.txt)
 
 # Change to MIRA app directory
 cd /opt/mira/app
@@ -106,36 +70,25 @@ print_success "MIRA CLI configured"
 if [ "${CONFIG_INSTALL_SYSTEMD}" = "yes" ] && [ "$OS" = "linux" ]; then
     print_header "Step 16: Systemd Service Configuration"
 
-    # Extract Vault credentials from files
-    echo -ne "${DIM}${ARROW}${RESET} Reading Vault credentials... "
-    VAULT_ROLE_ID=$(cat /opt/vault/role-id.txt)
-    VAULT_SECRET_ID=$(cat /opt/vault/secret-id.txt)
+    # Create systemd service file
+    echo -ne "${DIM}${ARROW}${RESET} Creating systemd service file... "
 
-    if [ -z "$VAULT_ROLE_ID" ] || [ -z "$VAULT_SECRET_ID" ]; then
-        echo -e "${ERROR}"
-        print_error "Failed to read Vault credentials from /opt/vault/"
-        print_info "Skipping systemd service creation"
-        CONFIG_INSTALL_SYSTEMD="failed"
-        STATUS_MIRA_SERVICE="${ERROR} Configuration failed"
+    # Set correct PostgreSQL service name based on distro
+    if [ "$DISTRO" = "fedora" ]; then
+        PG_SERVICE="postgresql-17.service"
     else
-        echo -e "${CHECKMARK}"
+        PG_SERVICE="postgresql.service"
+    fi
 
-        # Create systemd service file
-        echo -ne "${DIM}${ARROW}${RESET} Creating systemd service file... "
+    # Get the home directory of the MIRA user for age key path
+    MIRA_USER_HOME=$(eval echo ~$MIRA_USER)
 
-        # Set correct PostgreSQL service name based on distro
-        if [ "$DISTRO" = "fedora" ]; then
-            PG_SERVICE="postgresql-17.service"
-        else
-            PG_SERVICE="postgresql.service"
-        fi
-
-        sudo tee /etc/systemd/system/mira.service > /dev/null <<EOF
+    sudo tee /etc/systemd/system/mira.service > /dev/null <<EOF
 [Unit]
 Description=MIRA - AI Assistant with Persistent Memory
 Documentation=https://github.com/taylorsatula/mira-OSS
-Requires=vault.service ${PG_SERVICE} valkey.service
-After=vault.service ${PG_SERVICE} valkey.service vault-unseal.service
+Requires=${PG_SERVICE} valkey.service
+After=${PG_SERVICE} valkey.service
 ConditionPathExists=/opt/mira/app/main.py
 
 [Service]
@@ -143,9 +96,7 @@ Type=simple
 User=$MIRA_USER
 Group=$MIRA_GROUP
 WorkingDirectory=/opt/mira/app
-Environment="VAULT_ADDR=http://127.0.0.1:8200"
-Environment="VAULT_ROLE_ID=$VAULT_ROLE_ID"
-Environment="VAULT_SECRET_ID=$VAULT_SECRET_ID"
+Environment="SOPS_AGE_KEY_FILE=${MIRA_USER_HOME}/.config/mira/age.key"
 ExecStart=/opt/mira/app/venv/bin/python3 /opt/mira/app/main.py
 Restart=on-failure
 RestartSec=10
@@ -158,41 +109,40 @@ SyslogIdentifier=mira
 [Install]
 WantedBy=multi-user.target
 EOF
-        echo -e "${CHECKMARK}"
+    echo -e "${CHECKMARK}"
 
-        # Reload systemd and enable service
-        run_quiet sudo systemctl daemon-reload
+    # Reload systemd and enable service
+    run_quiet sudo systemctl daemon-reload
 
-        run_with_status "Enabling MIRA service for auto-start on boot" \
-            sudo systemctl enable mira.service
+    run_with_status "Enabling MIRA service for auto-start on boot" \
+        sudo systemctl enable mira.service
 
-        print_success "Systemd service configured"
-        print_info "Service will auto-start on system boot"
+    print_success "Systemd service configured"
+    print_info "Service will auto-start on system boot"
 
-        # Start service if user chose to during configuration
-        if [ "${CONFIG_START_MIRA_NOW}" = "yes" ]; then
-            echo ""
-            start_service mira.service systemctl
+    # Start service if user chose to during configuration
+    if [ "${CONFIG_START_MIRA_NOW}" = "yes" ]; then
+        echo ""
+        start_service mira.service systemctl
 
-            # Give service a moment to start
-            sleep 2
+        # Give service a moment to start
+        sleep 2
 
-            # Check if service started successfully
-            if sudo systemctl is-active --quiet mira.service; then
-                print_success "MIRA service is running"
-                print_info "View logs: journalctl -u mira -f"
-                STATUS_MIRA_SERVICE="${CHECKMARK} Running"
-            else
-                print_warning "MIRA service may have failed to start"
-                print_info "Check status: systemctl status mira"
-                print_info "View logs: journalctl -u mira -n 50"
-                STATUS_MIRA_SERVICE="${ERROR} Start failed"
-            fi
+        # Check if service started successfully
+        if sudo systemctl is-active --quiet mira.service; then
+            print_success "MIRA service is running"
+            print_info "View logs: journalctl -u mira -f"
+            STATUS_MIRA_SERVICE="${CHECKMARK} Running"
         else
-            print_info "To start later: sudo systemctl start mira"
-            print_info "To view logs: journalctl -u mira -f"
-            STATUS_MIRA_SERVICE="${DIM}Not started${RESET}"
+            print_warning "MIRA service may have failed to start"
+            print_info "Check status: systemctl status mira"
+            print_info "View logs: journalctl -u mira -n 50"
+            STATUS_MIRA_SERVICE="${ERROR} Start failed"
         fi
+    else
+        print_info "To start later: sudo systemctl start mira"
+        print_info "To view logs: journalctl -u mira -f"
+        STATUS_MIRA_SERVICE="${DIM}Not started${RESET}"
     fi
 elif [ "${CONFIG_INSTALL_SYSTEMD}" = "no" ]; then
     print_header "Step 16: Systemd Service Configuration"
@@ -210,12 +160,7 @@ else
 fi
 
 # Remove temporary files silently
-run_quiet rm -f /tmp/mira-policy.hcl
-
-if [ "$OS" = "linux" ]; then
-    run_quiet rm -f /tmp/vault_1.18.3_linux_*.zip
-    run_quiet rm -f /tmp/vault
-fi
+run_quiet rm -f /tmp/mira_secrets_*.yaml
 
 print_success "Cleanup complete"
 
@@ -232,13 +177,9 @@ print_success "MIRA installed to: /opt/mira/app"
 print_success "All temporary files cleaned up"
 
 echo ""
-echo -e "${BOLD}${BLUE}Important Files${RESET} ${DIM}(/opt/vault/)${RESET}"
-print_info "init-keys.txt (Vault unseal key and root token)"
-print_info "role-id.txt (AppRole role ID)"
-print_info "secret-id.txt (AppRole secret ID)"
-if [ "$OS" = "macos" ]; then
-    print_info "vault.pid (Vault process ID)"
-fi
+echo -e "${BOLD}${BLUE}Important Files${RESET}"
+print_info "Age key: ~/.config/mira/age.key (BACK THIS UP!)"
+print_info "Secrets: /opt/mira/app/secrets.enc.yaml"
 
 echo ""
 if [ "$CONFIG_OFFLINE_MODE" = "yes" ]; then
@@ -247,7 +188,7 @@ if [ "$CONFIG_OFFLINE_MODE" = "yes" ]; then
     echo -e "  Model:  ${CONFIG_OLLAMA_MODEL}"
     echo ""
     print_info "Ensure Ollama is running: ollama serve"
-    print_info "To switch to online mode, add API keys to Vault"
+    print_info "To switch to online mode: python scripts/secrets_cli.py edit"
 else
     echo -e "${BOLD}${BLUE}API Key Configuration${RESET}"
     echo -e "  Anthropic:       ${STATUS_ANTHROPIC}"
@@ -263,14 +204,9 @@ else
         echo ""
         print_warning "Required API keys not configured!"
         print_info "MIRA will not work until you set both API keys."
-        print_info "To configure later, use Vault CLI:"
-        echo -e "${DIM}    export VAULT_ADDR='http://127.0.0.1:8200'${RESET}"
-        echo -e "${DIM}    vault login <root-token-from-init-keys.txt>${RESET}"
-        echo -e "${DIM}    vault kv put secret/mira/api_keys \\${RESET}"
-        echo -e "${DIM}      anthropic_key=\"sk-ant-your-key\" \\${RESET}"
-        echo -e "${DIM}      anthropic_batch_key=\"sk-ant-your-key\" \\${RESET}"
-        echo -e "${DIM}      provider_key=\"your-provider-api-key\" \\${RESET}"
-        echo -e "${DIM}      kagi_api_key=\"your-kagi-key\"${RESET}"
+        print_info "To configure, run:"
+        echo -e "${DIM}    cd /opt/mira/app${RESET}"
+        echo -e "${DIM}    python scripts/secrets_cli.py edit${RESET}"
     fi
 fi
 
@@ -278,14 +214,12 @@ echo ""
 echo -e "${BOLD}${BLUE}Services Running${RESET}"
 if [ "$OS" = "linux" ]; then
     print_info "Valkey: localhost:6379"
-    print_info "Vault: http://localhost:8200 (systemd service)"
     print_info "PostgreSQL: localhost:5432 (systemd service)"
     if [ "${CONFIG_INSTALL_SYSTEMD}" = "yes" ]; then
         print_info "MIRA: http://localhost:1993 (systemd service - ${STATUS_MIRA_SERVICE})"
     fi
 elif [ "$OS" = "macos" ]; then
     print_info "Valkey: localhost:6379 (brew services)"
-    print_info "Vault: http://localhost:8200 (background process)"
     print_info "PostgreSQL: localhost:5432 (brew services)"
 fi
 
@@ -315,16 +249,13 @@ elif [ "$OS" = "macos" ]; then
 fi
 
 echo ""
-print_warning "IMPORTANT: Secure /opt/vault/ - it contains sensitive credentials!"
+print_warning "IMPORTANT: Back up ~/.config/mira/age.key - it's required to decrypt secrets!"
 
 if [ "$OS" = "macos" ]; then
     echo ""
     echo -e "${BOLD}${YELLOW}macOS Notes${RESET}"
-    print_info "Vault is running as a background process"
-    print_info "To stop: kill \$(cat /opt/vault/vault.pid)"
-    print_info "After system restart, manually start Vault and unseal:"
-    echo -e "${DIM}    /opt/vault/unseal.sh${RESET}"
     print_info "PostgreSQL and Valkey are managed by brew services"
+    print_info "To edit secrets: python scripts/secrets_cli.py edit"
 fi
 
 # Prompt to launch MIRA CLI immediately
@@ -337,10 +268,8 @@ if [[ "$LAUNCH_MIRA" =~ ^[Yy](es)?$ ]]; then
     echo ""
     print_success "Launching MIRA CLI..."
     echo ""
-    # Set up Vault environment and launch
-    export VAULT_ADDR='http://127.0.0.1:8200'
-    export VAULT_ROLE_ID=$(cat /opt/vault/role-id.txt)
-    export VAULT_SECRET_ID=$(cat /opt/vault/secret-id.txt)
+    # Set up SOPS environment and launch
+    export SOPS_AGE_KEY_FILE="$HOME/.config/mira/age.key"
     cd /opt/mira/app
     exec venv/bin/python3 talkto_mira.py
 fi

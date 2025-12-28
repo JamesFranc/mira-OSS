@@ -8,12 +8,12 @@ import pytest
 
 
 @pytest.fixture
-def vault_unavailable(monkeypatch):
-    """Simulate Vault unavailability for error testing."""
-    def mock_get_secret(*args, **kwargs):
-        raise RuntimeError("Vault connection failed")
-    
-    monkeypatch.setattr("clients.vault_client.VaultClient.get_secret", mock_get_secret)
+def secrets_unavailable(monkeypatch):
+    """Simulate secrets backend unavailability for error testing."""
+    def mock_get(*args, **kwargs):
+        raise RuntimeError("Secrets backend unavailable")
+
+    monkeypatch.setattr("clients.secrets.sops_backend.SOPSBackend.get", mock_get)
 
 
 @pytest.fixture

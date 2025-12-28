@@ -77,7 +77,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from clients.llm_provider import LLMProvider
-from clients.vault_client import get_api_key
+from clients.secrets.compat import get_api_key
 from clients.hybrid_embeddings_provider import get_hybrid_embeddings_provider
 
 logger = logging.getLogger(__name__)

@@ -303,15 +303,15 @@ def continuum_pool():
 
 
 @pytest_asyncio.fixture
-async def vault_client():
-    """Provide real vault client for testing."""
-    from clients.vault_client import VaultClient
+async def secrets_backend():
+    """Provide real secrets backend for testing."""
+    from clients.secrets import get_secrets_backend
     try:
-        client = VaultClient()
-        client.get_secret('mira/auth', 'jwt_secret_key')
-        return client
+        backend = get_secrets_backend()
+        backend.get('auth.jwt_secret')
+        return backend
     except Exception as e:
-        pytest.skip(f"Vault unavailable: {e}")
+        pytest.skip(f"Secrets backend unavailable: {e}")
 
 
 @pytest_asyncio.fixture
@@ -511,17 +511,13 @@ def authenticated_client(test_client):
     """
     Create authenticated test client with API key header.
     """
-    from clients.vault_client import _ensure_vault_client
+    from clients.secrets.compat import get_api_key
 
     try:
-        vault_client = _ensure_vault_client()
-        secret_data = vault_client.client.secrets.kv.v2.read_secret_version(
-            path='mira/api_keys'
-        )
-        api_key = secret_data['data']['data'].get('mira_api')
+        api_key = get_api_key('mira_api')
         test_client.headers = {"Authorization": f"Bearer {api_key}"}
     except Exception as e:
-        pytest.skip(f"Could not get API key from Vault: {e}")
+        pytest.skip(f"Could not get API key from secrets: {e}")
 
     return test_client
 
@@ -546,18 +542,14 @@ async def authenticated_async_client():
     """
     import httpx
     from main import create_app
-    from clients.vault_client import _ensure_vault_client
+    from clients.secrets.compat import get_api_key
 
     app = create_app()
 
     try:
-        vault_client = _ensure_vault_client()
-        secret_data = vault_client.client.secrets.kv.v2.read_secret_version(
-            path='mira/api_keys'
-        )
-        api_key = secret_data['data']['data'].get('mira_api')
+        api_key = get_api_key('mira_api')
     except Exception as e:
-        pytest.skip(f"Could not get API key from Vault: {e}")
+        pytest.skip(f"Could not get API key from secrets: {e}")
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

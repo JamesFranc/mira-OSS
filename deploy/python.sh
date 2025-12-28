@@ -23,19 +23,31 @@ if [ "$OS" = "linux" ]; then
     fi
     PYTHON_CMD="python${PYTHON_VER}"
 elif [ "$OS" = "macos" ]; then
-    # Detect macOS Python version
-    PYTHON_VER=$(python3 --version 2>&1 | sed -n 's/Python \([0-9]*\.[0-9]*\).*/\1/p')
+    # Prefer Homebrew Python over system Python (which is often outdated 3.9)
+    # Check for modern Python versions in order of preference
+    PYTHON_CMD=""
+    for ver in 3.13 3.12 3.11 3.10; do
+        # Check Homebrew ARM64 location first
+        if [ -f "/opt/homebrew/bin/python${ver}" ]; then
+            PYTHON_CMD="/opt/homebrew/bin/python${ver}"
+            PYTHON_VER="$ver"
+            break
+        # Check Homebrew Intel location
+        elif [ -f "/usr/local/bin/python${ver}" ]; then
+            PYTHON_CMD="/usr/local/bin/python${ver}"
+            PYTHON_VER="$ver"
+            break
+        # Check if version is in PATH
+        elif command -v python${ver} &> /dev/null; then
+            PYTHON_CMD="python${ver}"
+            PYTHON_VER="$ver"
+            break
+        fi
+    done
 
-    # Check common Homebrew locations
-    if command -v python${PYTHON_VER} &> /dev/null; then
-        PYTHON_CMD="python${PYTHON_VER}"
-    elif [ -f "/opt/homebrew/opt/python@${PYTHON_VER}/bin/python${PYTHON_VER}" ]; then
-        PYTHON_CMD="/opt/homebrew/opt/python@${PYTHON_VER}/bin/python${PYTHON_VER}"
-    elif [ -f "/usr/local/opt/python@${PYTHON_VER}/bin/python${PYTHON_VER}" ]; then
-        PYTHON_CMD="/usr/local/opt/python@${PYTHON_VER}/bin/python${PYTHON_VER}"
-    else
+    if [ -z "$PYTHON_CMD" ]; then
         echo -e "${ERROR}"
-        print_error "Python ${PYTHON_VER} not found. Check Homebrew installation."
+        print_error "Python 3.10+ not found. Install via: brew install python@3.13"
         exit 1
     fi
 fi
@@ -59,14 +71,14 @@ cd /tmp
 
 # NOTE: Currently downloads from main branch for active development
 # When ready for stable release, change to:
-#   wget -q -O mira-X.XX.tar.gz https://github.com/taylorsatula/mira-OSS/archive/refs/tags/X.XX.tar.gz
+#   wget -q -O mira-X.XX.tar.gz https://github.com/jamesfranc/mira-OSS/archive/refs/tags/X.XX.tar.gz
 #   tar -xzf mira-X.XX.tar.gz -C /tmp
 #   sudo cp -r /tmp/mira-OSS-X.XX/* /opt/mira/app/
 #   rm -f /tmp/mira-X.XX.tar.gz
 #   rm -rf /tmp/mira-OSS-X.XX
 
 run_with_status "Downloading MIRA from main branch" \
-    wget -q -O mira-main.tar.gz https://github.com/taylorsatula/mira-OSS/archive/refs/heads/main.tar.gz
+    wget -q -O mira-main.tar.gz https://github.com/jamesrfranc/mira-OSS/archive/refs/heads/main.tar.gz
 
 run_with_status "Creating /opt/mira/app directory" \
     sudo mkdir -p /opt/mira/app

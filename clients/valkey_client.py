@@ -53,9 +53,9 @@ class ValkeyClient:
     def _load_config(self):
         """Loads config from Vault first, falls back to VALKEY_URL env var."""
         try:
-            from clients.vault_client import get_service_config
+            from clients.secrets.compat import get_service_config
             self.valkey_url = get_service_config('services', 'valkey_url')
-            logger.info(f"Valkey config loaded from Vault: {self.valkey_url}")
+            logger.info(f"Valkey config loaded from secrets: {self.valkey_url}")
         except Exception as e:
             import os
             self.valkey_url = os.getenv('VALKEY_URL', 'valkey://localhost:6379')

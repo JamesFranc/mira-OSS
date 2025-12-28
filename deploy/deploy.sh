@@ -15,13 +15,12 @@
 # The deployment is broken into modular scripts:
 #   lib/output.sh     - Visual output functions (colors, spinners)
 #   lib/services.sh   - Service management helpers
-#   lib/vault.sh      - Vault-specific helper functions
 #   config.sh         - Interactive configuration gathering
 #   preflight.sh      - System detection and validation
 #   dependencies.sh   - System package installation
 #   python.sh         - Python environment and MIRA setup
-#   vault.sh          - HashiCorp Vault setup
-#   postgresql.sh     - Database setup and credential storage
+#   postgresql.sh     - Database setup
+#   secrets.sh        - SOPS-based secrets initialization
 #   finalize.sh       - CLI setup, systemd, cleanup
 
 set -e
@@ -59,7 +58,6 @@ done
 # ============================================================================
 source "${SCRIPT_DIR}/lib/output.sh"
 source "${SCRIPT_DIR}/lib/services.sh"
-source "${SCRIPT_DIR}/lib/vault.sh"
 
 # ============================================================================
 # Migration Mode (--migrate flag)
@@ -121,25 +119,23 @@ source "${SCRIPT_DIR}/dependencies.sh"
 source "${SCRIPT_DIR}/python.sh"
 
 # ============================================================================
-# Phase 5: Vault Setup
-# ============================================================================
-# vault.sh handles:
-#   - Vault binary download/installation
-#   - Service configuration
-#   - Initialization and auto-unseal
-#   - Sets: VAULT_ADDR (exported)
-source "${SCRIPT_DIR}/vault.sh"
-
-# ============================================================================
-# Phase 6: Database & Credentials
+# Phase 5: Database Setup
 # ============================================================================
 # postgresql.sh handles:
 #   - Starting services (macOS)
 #   - PostgreSQL readiness check
 #   - Schema deployment
 #   - Password updates
-#   - Vault credential storage
 source "${SCRIPT_DIR}/postgresql.sh"
+
+# ============================================================================
+# Phase 6: Secrets Setup
+# ============================================================================
+# secrets.sh handles:
+#   - SOPS/age installation verification
+#   - Age keypair generation
+#   - Secrets file creation with collected API keys
+source "${SCRIPT_DIR}/secrets.sh"
 
 # ============================================================================
 # Phase 7: Finalization

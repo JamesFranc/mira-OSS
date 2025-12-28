@@ -140,7 +140,7 @@ class LTMemorySessionManager:
         with self._lock:
             if database_name not in self._pools:
                 try:
-                    from clients.vault_client import get_database_url
+                    from clients.secrets.compat import get_database_url
 
                     # Determine if this is an admin pool
                     is_admin = database_name == 'mira_service_admin'

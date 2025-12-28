@@ -2,7 +2,7 @@
 # MIRA Migration Orchestrator - Upgrade across versions preserving user data
 # Source this file - do not execute directly
 #
-# Requires: lib/output.sh, lib/services.sh, lib/vault.sh, lib/migrate.sh sourced first
+# Requires: lib/output.sh, lib/services.sh, lib/migrate.sh sourced first
 # Requires: LOUD_MODE variable set
 #
 # Usage: ./deploy/deploy.sh --migrate [--loud] [--dry-run]
@@ -102,7 +102,7 @@ print_header "Phase 1: Pre-flight Validation"
 
 migrate_check_existing_install || exit 1
 migrate_check_postgresql_running || exit 1
-migrate_check_vault_accessible || exit 1
+migrate_check_secrets_accessible || exit 1
 migrate_check_disk_space || exit 1
 migrate_check_no_active_sessions || exit 1
 
@@ -137,22 +137,20 @@ else
 fi
 
 # CRITICAL: Capture complete snapshots FIRST for integrity verification
-VAULT_SNAPSHOT_FILE="${BACKUP_DIR}/vault_snapshot.json"
-capture_vault_snapshot "$VAULT_SNAPSHOT_FILE" || exit 1
+SECRETS_SNAPSHOT_FILE="${BACKUP_DIR}/secrets_snapshot.json"
+capture_secrets_snapshot "$SECRETS_SNAPSHOT_FILE" || exit 1
 
 DB_SNAPSHOT_FILE="${BACKUP_DIR}/db_snapshot.json"
 capture_database_snapshot "$DB_SNAPSHOT_FILE" || exit 1
 
 if is_dry_run; then
     dry_run_notice "Create PostgreSQL backup (pg_dump)"
-    dry_run_notice "Export Vault secrets to JSON"
+    dry_run_notice "Backup SOPS secrets and age key"
     dry_run_notice "Copy user data files"
-    dry_run_notice "Backup Vault init keys"
 else
     backup_postgresql_data || exit 1
-    backup_vault_secrets || exit 1
+    backup_secrets || exit 1
     backup_user_data_files || exit 1
-    backup_vault_init_keys || exit 1
     create_backup_manifest || exit 1
 fi
 
@@ -174,27 +172,25 @@ fi
 
 print_header "Phase 3: Preparing Configuration"
 
-# Extract CONFIG_* values from backed-up vault secrets for deploy modules
+# Extract CONFIG_* values from backed-up SOPS secrets for deploy modules
 echo -ne "${DIM}${ARROW}${RESET} Extracting configuration from backup... "
 
-# Read database password from backup
-if [ -f "${BACKUP_DIR}/vault_database.json" ]; then
-    CONFIG_DB_PASSWORD=$(jq -r '.password // empty' "${BACKUP_DIR}/vault_database.json" 2>/dev/null || echo "")
-fi
-CONFIG_DB_PASSWORD="${CONFIG_DB_PASSWORD:-changethisifdeployingpwd}"
-
-# Read API keys from backup
-if [ -f "${BACKUP_DIR}/vault_api_keys.json" ]; then
-    CONFIG_ANTHROPIC_KEY=$(jq -r '.anthropic_key // empty' "${BACKUP_DIR}/vault_api_keys.json" 2>/dev/null || echo "")
-    CONFIG_ANTHROPIC_BATCH_KEY=$(jq -r '.anthropic_batch_key // empty' "${BACKUP_DIR}/vault_api_keys.json" 2>/dev/null || echo "")
-    CONFIG_PROVIDER_KEY=$(jq -r '.provider_key // empty' "${BACKUP_DIR}/vault_api_keys.json" 2>/dev/null || echo "")
-    CONFIG_KAGI_KEY=$(jq -r '.kagi_api_key // empty' "${BACKUP_DIR}/vault_api_keys.json" 2>/dev/null || echo "")
+# Read configuration from SOPS backup
+if [ -f "${BACKUP_DIR}/secrets.enc.yaml" ] && [ -f "${BACKUP_DIR}/age.key" ]; then
+    export SOPS_AGE_KEY_FILE="${BACKUP_DIR}/age.key"
+    DECRYPTED_SECRETS=$(sops -d "${BACKUP_DIR}/secrets.enc.yaml" 2>/dev/null || echo "")
+    if [ -n "$DECRYPTED_SECRETS" ]; then
+        CONFIG_DB_PASSWORD=$(echo "$DECRYPTED_SECRETS" | yq '.database.password // empty' 2>/dev/null || echo "")
+        CONFIG_ANTHROPIC_KEY=$(echo "$DECRYPTED_SECRETS" | yq '.providers.anthropic.api_key // empty' 2>/dev/null || echo "")
+        CONFIG_ANTHROPIC_BATCH_KEY=$(echo "$DECRYPTED_SECRETS" | yq '.providers.anthropic.batch_api_key // empty' 2>/dev/null || echo "")
+        CONFIG_KAGI_KEY=$(echo "$DECRYPTED_SECRETS" | yq '.providers.kagi.api_key // empty' 2>/dev/null || echo "")
+    fi
 fi
 
 # Set defaults for missing values (allows migration of offline-mode installs)
+CONFIG_DB_PASSWORD="${CONFIG_DB_PASSWORD:-changethisifdeployingpwd}"
 CONFIG_ANTHROPIC_KEY="${CONFIG_ANTHROPIC_KEY:-OFFLINE_MODE_PLACEHOLDER}"
 CONFIG_ANTHROPIC_BATCH_KEY="${CONFIG_ANTHROPIC_BATCH_KEY:-$CONFIG_ANTHROPIC_KEY}"
-CONFIG_PROVIDER_KEY="${CONFIG_PROVIDER_KEY:-}"
 CONFIG_KAGI_KEY="${CONFIG_KAGI_KEY:-}"
 
 # Set other CONFIG_* for deploy modules
@@ -217,7 +213,6 @@ print_header "Phase 4: Stopping Services"
 
 if is_dry_run; then
     dry_run_skip "Stop MIRA service"
-    dry_run_skip "Stop Vault service"
     dry_run_skip "Stop Valkey service"
     print_info "PostgreSQL would remain running (needed for schema operations)"
 else
@@ -228,19 +223,6 @@ else
     else
         # macOS - kill by port
         lsof -ti :1993 | xargs kill 2>/dev/null || true
-    fi
-    echo -e "${CHECKMARK}"
-
-    # Stop Vault
-    echo -ne "${DIM}${ARROW}${RESET} Stopping Vault... "
-    if [ "$OS" = "linux" ]; then
-        sudo systemctl stop vault-unseal.service 2>/dev/null || true
-        sudo systemctl stop vault.service 2>/dev/null || true
-    else
-        if [ -f /opt/vault/vault.pid ]; then
-            kill $(cat /opt/vault/vault.pid) 2>/dev/null || true
-            rm -f /opt/vault/vault.pid
-        fi
     fi
     echo -e "${CHECKMARK}"
 
@@ -268,8 +250,6 @@ print_header "Phase 5: Cleaning Old Installation"
 
 if is_dry_run; then
     dry_run_skip "Move /opt/mira/app to backup"
-    dry_run_skip "Remove /opt/vault/data"
-    dry_run_skip "Remove Vault credential files"
     dry_run_skip "Drop mira_service database"
 else
     # Preserve old app in backup
@@ -277,12 +257,6 @@ else
     if [ -d "/opt/mira/app" ]; then
         sudo mv /opt/mira/app "${BACKUP_DIR}/old_app"
     fi
-    echo -e "${CHECKMARK}"
-
-    # Remove old Vault data (fresh init coming)
-    echo -ne "${DIM}${ARROW}${RESET} Removing old Vault data... "
-    sudo rm -rf /opt/vault/data
-    sudo rm -f /opt/vault/init-keys.txt /opt/vault/role-id.txt /opt/vault/secret-id.txt
     echo -e "${CHECKMARK}"
 
     # Drop old database
@@ -310,7 +284,7 @@ print_header "Phase 6: Fresh Installation"
 if is_dry_run; then
     dry_run_skip "Run dependencies.sh (system packages)"
     dry_run_skip "Run python.sh (clone MIRA, create venv)"
-    dry_run_skip "Run vault.sh (initialize Vault)"
+    dry_run_skip "Run secrets.sh (initialize SOPS secrets)"
     dry_run_skip "Run postgresql.sh (deploy schema)"
 else
     print_info "Running deployment modules..."
@@ -323,7 +297,6 @@ else
     export CONFIG_DB_PASSWORD
     export CONFIG_ANTHROPIC_KEY
     export CONFIG_ANTHROPIC_BATCH_KEY
-    export CONFIG_PROVIDER_KEY
     export CONFIG_KAGI_KEY
     export CONFIG_INSTALL_PLAYWRIGHT
     export CONFIG_INSTALL_SYSTEMD
@@ -338,8 +311,8 @@ else
     source "${SCRIPT_DIR}/python.sh"
     echo ""
 
-    # vault.sh - Fresh Vault initialization
-    source "${SCRIPT_DIR}/vault.sh"
+    # secrets.sh - SOPS secrets initialization
+    source "${SCRIPT_DIR}/secrets.sh"
     echo ""
 
     # postgresql.sh - Fresh schema deployment
@@ -357,12 +330,12 @@ echo ""
 print_header "Phase 7: Restoring Data"
 
 if is_dry_run; then
-    dry_run_skip "Restore Vault secrets from backup"
+    dry_run_skip "Restore secrets from backup"
     dry_run_skip "Restore PostgreSQL data (pg_restore)"
     dry_run_skip "Restore user data files"
 else
-    # Restore Vault secrets first (needed for user data decryption)
-    restore_vault_secrets || exit 1
+    # Restore secrets first (needed for user data decryption)
+    restore_secrets || exit 1
 
     # Restore PostgreSQL data
     restore_postgresql_data || exit 1
@@ -381,17 +354,16 @@ echo ""
 print_header "Phase 8: Verification"
 
 if is_dry_run; then
-    dry_run_skip "Verify Vault integrity against snapshot"
+    dry_run_skip "Verify secrets integrity"
     dry_run_skip "Verify database integrity against snapshot"
     dry_run_skip "Verify memory embeddings preserved"
     dry_run_skip "Verify user data files restored"
 else
-    # CRITICAL: Verify Vault integrity by comparing against pre-migration snapshot
-    verify_vault_snapshot "$VAULT_SNAPSHOT_FILE" || {
-        print_error "VAULT INTEGRITY CHECK FAILED"
-        print_info "Pre-migration snapshot: $VAULT_SNAPSHOT_FILE"
-        print_info "Backup JSON files available at: $BACKUP_DIR/vault_*.json"
-        print_info "You may need to manually restore missing secrets"
+    # CRITICAL: Verify secrets are accessible
+    verify_secrets_restored "$BACKUP_DIR" || {
+        print_error "SECRETS INTEGRITY CHECK FAILED"
+        print_info "Backup files available at: $BACKUP_DIR/secrets.enc.yaml"
+        print_info "You may need to manually restore secrets"
         finalize_migration_log "FAILED"
         exit 1
     }

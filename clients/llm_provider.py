@@ -251,10 +251,10 @@ class LLMProvider:
         # Get execution model API key from Vault (None for local providers like Ollama)
         if execution_config.api_key_name:
             try:
-                from clients.vault_client import get_api_key
+                from clients.secrets.compat import get_api_key
                 self.execution_api_key = get_api_key(execution_config.api_key_name)
                 if not self.execution_api_key:
-                    self.logger.warning(f"Execution model API key '{execution_config.api_key_name}' not found in Vault - execution model disabled")
+                    self.logger.warning(f"Execution model API key '{execution_config.api_key_name}' not found - execution model disabled")
             except Exception as e:
                 self.logger.error(f"Failed to get execution model API key: {e}")
                 self.execution_api_key = None
@@ -279,10 +279,10 @@ class LLMProvider:
             # API key is optional for local providers like Ollama
             if config.api.emergency_fallback_api_key_name:
                 try:
-                    from clients.vault_client import get_api_key
+                    from clients.secrets.compat import get_api_key
                     self.emergency_fallback_api_key = get_api_key(config.api.emergency_fallback_api_key_name)
                     if not self.emergency_fallback_api_key:
-                        self.logger.warning(f"Emergency fallback API key '{config.api.emergency_fallback_api_key_name}' not found in Vault")
+                        self.logger.warning(f"Emergency fallback API key '{config.api.emergency_fallback_api_key_name}' not found")
                 except Exception as e:
                     self.logger.warning(f"Failed to get emergency fallback API key: {e}")
 

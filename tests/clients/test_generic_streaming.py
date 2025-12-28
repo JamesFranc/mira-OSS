@@ -12,7 +12,7 @@ import pytest
 import time
 
 from clients.llm_provider import LLMProvider
-from clients.vault_client import get_api_key
+from clients.secrets.compat import get_api_key
 from cns.core.stream_events import (
     TextEvent, CompleteEvent, ToolDetectedEvent,
     ToolExecutingEvent, ToolCompletedEvent

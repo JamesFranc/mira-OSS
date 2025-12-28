@@ -125,9 +125,9 @@ esac
 
 print_header "Port Availability Check"
 
-echo -ne "${DIM}${ARROW}${RESET} Checking ports 1993, 8200, 6379, 5432... "
+echo -ne "${DIM}${ARROW}${RESET} Checking ports 1993, 6379, 5432... "
 PORTS_IN_USE=""
-for PORT in 1993 8200 6379 5432; do
+for PORT in 1993 6379 5432; do
     if command -v lsof &> /dev/null; then
         if lsof -Pi :$PORT -sTCP:LISTEN -t >/dev/null 2>&1; then
             PORTS_IN_USE="$PORTS_IN_USE $PORT"
@@ -142,7 +142,7 @@ done
 if [ -n "$PORTS_IN_USE" ]; then
     echo -e "${WARNING}"
     print_warning "The following ports are already in use:$PORTS_IN_USE"
-    print_info "MIRA requires: 1993 (app), 8200 (vault), 6379 (valkey), 5432 (postgresql)"
+    print_info "MIRA requires: 1993 (app), 6379 (valkey), 5432 (postgresql)"
     read -p "$(echo -e ${YELLOW}Stop existing services and continue?${RESET}) (y/n): " CONTINUE
     if [[ ! "$CONTINUE" =~ ^[Yy](es)?$ ]]; then
         print_info "Installation cancelled. Free up the required ports and try again."
@@ -154,24 +154,6 @@ if [ -n "$PORTS_IN_USE" ]; then
     print_info "Stopping services on occupied ports..."
     for PORT in $PORTS_IN_USE; do
         case $PORT in
-            8200)
-                # Vault - canonical method per OS, fallback to port-based stop
-                if [ "$OS" = "linux" ]; then
-                    echo -ne "${DIM}${ARROW}${RESET} Stopping Vault (port 8200)... "
-                    if check_exists service_systemctl vault; then
-                        stop_service vault systemctl && echo -e "${CHECKMARK}" || echo -e "${WARNING}"
-                    else
-                        stop_service "Vault" port 8200 && echo -e "${CHECKMARK}" || echo -e "${WARNING}"
-                    fi
-                elif [ "$OS" = "macos" ]; then
-                    echo -ne "${DIM}${ARROW}${RESET} Stopping Vault (port 8200)... "
-                    if [ -f /opt/vault/vault.pid ]; then
-                        stop_service "Vault" pid_file /opt/vault/vault.pid && echo -e "${CHECKMARK}" || echo -e "${WARNING}"
-                    else
-                        stop_service "Vault" port 8200 && echo -e "${CHECKMARK}" || echo -e "${WARNING}"
-                    fi
-                fi
-                ;;
             6379)
                 # Valkey - canonical method per OS
                 echo -ne "${DIM}${ARROW}${RESET} Stopping Valkey (port 6379)... "
@@ -237,11 +219,11 @@ print_header "API Key Configuration"
 # Offline mode option
 echo -e "${BOLD}${BLUE}Run Mode${RESET}"
 print_info "MIRA can run offline using local Ollama - no API keys needed."
-print_info "To switch to online mode later, just add API keys to Vault."
+print_info "To switch to online mode later, run: python scripts/secrets_cli.py edit"
 read -p "$(echo -e ${CYAN}Run offline only?${RESET}) (y/n, default=n): " OFFLINE_MODE_INPUT
 if [[ "$OFFLINE_MODE_INPUT" =~ ^[Yy](es)?$ ]]; then
     CONFIG_OFFLINE_MODE="yes"
-    # Use placeholder keys so Vault validation passes - these won't actually work
+    # Use placeholder keys for offline mode - these won't actually work
     CONFIG_ANTHROPIC_KEY="OFFLINE_MODE_PLACEHOLDER"
     CONFIG_ANTHROPIC_BATCH_KEY="OFFLINE_MODE_PLACEHOLDER"
     CONFIG_PROVIDER_KEY="OFFLINE_MODE_PLACEHOLDER"

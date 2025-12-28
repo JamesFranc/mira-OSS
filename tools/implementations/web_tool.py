@@ -286,7 +286,7 @@ class WebTool(Tool):
     def _extract_with_llm(self, html: str, url: str, prompt: str, format_type: str) -> str:
         """Use LLM to extract content from cleaned HTML."""
         from config import config
-        from clients.vault_client import get_api_key
+        from clients.secrets.compat import get_api_key
         from clients.llm_provider import LLMProvider
 
         # Get tool-specific LLM config
@@ -405,9 +405,9 @@ SOURCE: {url}"""
     # --- Helpers ---
 
     def _init_kagi(self) -> None:
-        """Initialize Kagi client from vault."""
+        """Initialize Kagi client from secrets."""
         try:
-            from clients.vault_client import get_api_key
+            from clients.secrets.compat import get_api_key
             api_key = get_api_key("kagi_api_key")
             if api_key:
                 self._kagi = KagiClient(api_key)

@@ -7,7 +7,17 @@ from .llm_provider import LLMProvider
 from .postgres_client import PostgresClient
 from .sqlite_client import SQLiteClient
 from .valkey_client import ValkeyClient, get_valkey, get_valkey_client
-from .vault_client import VaultClient, get_auth_secret, get_database_url, get_service_config
+
+# Secrets management - SOPS-based (replaces vault_client)
+from .secrets.compat import (
+    get_api_key,
+    get_auth_secret,
+    get_database_credentials,
+    get_database_url,
+    get_service_config,
+    preload_secrets,
+    test_vault_connection,
+)
 
 __all__ = [
     'HybridEmbeddingsProvider',
@@ -18,8 +28,12 @@ __all__ = [
     'ValkeyClient',
     'get_valkey',
     'get_valkey_client',
-    'VaultClient',
+    # Secrets management (SOPS-based)
+    'get_api_key',
     'get_auth_secret',
+    'get_database_credentials',
     'get_database_url',
-    'get_service_config'
+    'get_service_config',
+    'preload_secrets',
+    'test_vault_connection',
 ]
