@@ -78,7 +78,7 @@ cd /tmp
 #   rm -rf /tmp/mira-OSS-X.XX
 
 run_with_status "Downloading MIRA from main branch" \
-    wget -q -O mira-main.tar.gz https://github.com/jamesrfranc/mira-OSS/archive/refs/heads/main.tar.gz
+    wget -q -O mira-main.tar.gz https://github.com/jamesfranc/mira-OSS/archive/refs/heads/main.tar.gz
 
 run_with_status "Creating /opt/mira/app directory" \
     sudo mkdir -p /opt/mira/app
