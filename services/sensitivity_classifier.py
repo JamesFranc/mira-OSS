@@ -12,7 +12,7 @@ import re
 from enum import Enum
 from typing import List, Optional
 
-from config.config_manager import config_manager
+from config.config_manager import config
 
 
 class SensitivityLevel(str, Enum):
