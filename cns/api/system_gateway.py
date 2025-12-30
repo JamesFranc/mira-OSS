@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 
-from auth.dependencies import get_current_user_id
+from utils.user_context import get_current_user_id
 from services.hitl_approval_service import (
     get_hitl_service,
     ApprovalStatus,
