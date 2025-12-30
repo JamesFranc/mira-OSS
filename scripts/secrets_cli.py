@@ -174,10 +174,10 @@ def _create_secrets_template(secrets_path: Path, public_key: str) -> None:
             "google_maps_api_key": "",
         },
         "database": {
-            "service_url": "postgresql://mira_admin:mira_password@localhost:5432/mira_service",
-            "admin_url": "postgresql://postgres:postgres@localhost:5432/mira_service",
+            "service_url": "postgresql://mira_dbuser:changethisifdeployingpwd@localhost:5432/mira_service",
+            "admin_url": "postgresql://mira_admin:changethisifdeployingpwd@localhost:5432/mira_service",
             "username": "mira_admin",
-            "password": "mira_password",
+            "password": "changethisifdeployingpwd",
         },
         "services": {
             "valkey_url": "redis://localhost:6379/0",

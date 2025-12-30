@@ -125,60 +125,60 @@ class HITLApprovalService:
         
         # Store in Valkey with TTL
         key = f"{self.KEY_PREFIX}{request.id}"
-        await self._valkey.setex(key, ttl, json.dumps(request.to_dict()))
-        
+        self._valkey.setex(key, ttl, json.dumps(request.to_dict()))
+
         # Add to user's pending list
         user_key = f"{self.USER_INDEX_PREFIX}{user_id}"
-        await self._valkey.sadd(user_key, request.id)
-        await self._valkey.expire(user_key, ttl + 60)  # Slightly longer TTL for index
-        
+        self._valkey.sadd(user_key, request.id)
+        self._valkey.expire(user_key, ttl + 60)  # Slightly longer TTL for index
+
         logger.info(f"Queued approval request {request.id} for user {user_id}: {operation}")
         return request
-    
+
     async def get_status(self, approval_id: str) -> Optional[ApprovalRequest]:
         """
         Get the current status of an approval request.
-        
+
         Args:
             approval_id: The approval request ID
-            
+
         Returns:
             ApprovalRequest if found, None if expired or not found
         """
         key = f"{self.KEY_PREFIX}{approval_id}"
-        data = await self._valkey.get(key)
-        
+        data = self._valkey.get(key)
+
         if not data:
             return None
-        
+
         return ApprovalRequest.from_dict(json.loads(data))
-    
+
     async def get_pending_for_user(self, user_id: str) -> List[ApprovalRequest]:
         """
         Get all pending approval requests for a user.
-        
+
         Args:
             user_id: The user ID
-            
+
         Returns:
             List of pending ApprovalRequests
         """
         user_key = f"{self.USER_INDEX_PREFIX}{user_id}"
-        approval_ids = await self._valkey.smembers(user_key)
-        
+        approval_ids = self._valkey.smembers(user_key)
+
         requests = []
         expired_ids = []
-        
+
         for approval_id in approval_ids:
             request = await self.get_status(approval_id)
             if request and request.status == ApprovalStatus.PENDING:
                 requests.append(request)
             elif not request:
                 expired_ids.append(approval_id)
-        
+
         # Clean up expired IDs from user index
         if expired_ids:
-            await self._valkey.srem(user_key, *expired_ids)
+            self._valkey.srem(user_key, *expired_ids)
 
         return requests
 
@@ -203,7 +203,7 @@ class HITLApprovalService:
 
         # Update in Valkey (keep short TTL for result retrieval)
         key = f"{self.KEY_PREFIX}{approval_id}"
-        await self._valkey.setex(key, 60, json.dumps(request.to_dict()))
+        self._valkey.setex(key, 60, json.dumps(request.to_dict()))
 
         logger.info(f"Approved request {approval_id}")
         return True
@@ -237,7 +237,7 @@ class HITLApprovalService:
 
         # Update in Valkey (keep short TTL for result retrieval)
         key = f"{self.KEY_PREFIX}{approval_id}"
-        await self._valkey.setex(key, 60, json.dumps(request.to_dict()))
+        self._valkey.setex(key, 60, json.dumps(request.to_dict()))
 
         logger.info(f"Rejected request {approval_id}: {reason}")
         return True
@@ -289,7 +289,7 @@ def get_hitl_service() -> HITLApprovalService:
     """Get the singleton HITL approval service instance."""
     global _service
     if _service is None:
-        from config.config_manager import config_manager
-        ttl = config_manager.config.system_gateway.hitl_timeout
+        from config.config_manager import config
+        ttl = config.system_gateway.hitl_timeout
         _service = HITLApprovalService(default_ttl_seconds=ttl)
     return _service

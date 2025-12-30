@@ -33,9 +33,9 @@ def register_lt_memory_jobs(scheduler_service, lt_memory_factory) -> bool:
     """
     # Get services from factory
     extraction_orchestrator = lt_memory_factory.extraction_orchestrator
-    batch_coordinator = lt_memory_factory.batch_coordinator
+    batch_coordinator = lt_memory_factory.batch_coordinator  # May be None if no Anthropic client
     refinement = lt_memory_factory.refinement
-    batching = lt_memory_factory.batching  # Still needed for consolidation and entity persistence
+    batching = lt_memory_factory.batching  # May be None if no Anthropic client
 
     # Register failed extraction retry job (6-hour intervals)
     success_extraction = scheduler_service.register_job(
@@ -50,59 +50,63 @@ def register_lt_memory_jobs(scheduler_service, lt_memory_factory) -> bool:
         raise RuntimeError("Failed to register failed extraction retry job - scheduler job registration is critical")
     logger.info("Successfully registered failed extraction retry job (6-hour interval)")
 
-    # Register extraction batch polling job (1-minute intervals)
-    def poll_extraction_batches_with_handler():
-        """Poll extraction batches using batch coordinator with result handler."""
-        return batch_coordinator.poll_extraction_batches(
-            result_processor=lt_memory_factory.extraction_result_handler
+    # Batch polling jobs require Anthropic client - skip if unavailable
+    if batch_coordinator is not None:
+        # Register extraction batch polling job (1-minute intervals)
+        def poll_extraction_batches_with_handler():
+            """Poll extraction batches using batch coordinator with result handler."""
+            return batch_coordinator.poll_extraction_batches(
+                result_processor=lt_memory_factory.extraction_result_handler
+            )
+
+        # Wrap with monitoring and timeout (45 seconds for a 1-minute interval job)
+        monitored_extraction_poll = ScheduledTaskMonitor.wrap_scheduled_job(
+            job_id="lt_memory_extraction_batch_polling",
+            func=poll_extraction_batches_with_handler,
+            timeout_seconds=45,  # Kill if running longer than 45 seconds
+            kill_on_timeout=True
         )
 
-    # Wrap with monitoring and timeout (45 seconds for a 1-minute interval job)
-    monitored_extraction_poll = ScheduledTaskMonitor.wrap_scheduled_job(
-        job_id="lt_memory_extraction_batch_polling",
-        func=poll_extraction_batches_with_handler,
-        timeout_seconds=45,  # Kill if running longer than 45 seconds
-        kill_on_timeout=True
-    )
-
-    success_extraction_poll = scheduler_service.register_job(
-        job_id="lt_memory_extraction_batch_polling",
-        func=monitored_extraction_poll,
-        trigger=IntervalTrigger(minutes=1),
-        component="lt_memory",
-        description="Poll Anthropic Batch API for extraction results every 1 minute"
-    )
-
-    if not success_extraction_poll:
-        raise RuntimeError("Failed to register extraction batch polling job - scheduler job registration is critical")
-    logger.info("Successfully registered extraction batch polling job (1-minute interval)")
-
-    # Register relationship batch polling job (1-minute intervals)
-    def poll_relationship_batches_with_handler():
-        """Poll relationship batches using batch coordinator with result handler."""
-        return batch_coordinator.poll_relationship_batches(
-            result_processor=lt_memory_factory.relationship_result_handler
+        success_extraction_poll = scheduler_service.register_job(
+            job_id="lt_memory_extraction_batch_polling",
+            func=monitored_extraction_poll,
+            trigger=IntervalTrigger(minutes=1),
+            component="lt_memory",
+            description="Poll Anthropic Batch API for extraction results every 1 minute"
         )
 
-    # Wrap with monitoring and timeout (45 seconds for a 1-minute interval job)
-    monitored_relationship_poll = ScheduledTaskMonitor.wrap_scheduled_job(
-        job_id="lt_memory_linking_batch_polling",
-        func=poll_relationship_batches_with_handler,
-        timeout_seconds=45,  # Kill if running longer than 45 seconds
-        kill_on_timeout=True
-    )
+        if not success_extraction_poll:
+            raise RuntimeError("Failed to register extraction batch polling job - scheduler job registration is critical")
+        logger.info("Successfully registered extraction batch polling job (1-minute interval)")
 
-    success_linking_poll = scheduler_service.register_job(
-        job_id="lt_memory_linking_batch_polling",
-        func=monitored_relationship_poll,
-        trigger=IntervalTrigger(minutes=1),
-        component="lt_memory",
-        description="Poll Anthropic Batch API for relationship results every 1 minute"
-    )
+        # Register relationship batch polling job (1-minute intervals)
+        def poll_relationship_batches_with_handler():
+            """Poll relationship batches using batch coordinator with result handler."""
+            return batch_coordinator.poll_relationship_batches(
+                result_processor=lt_memory_factory.relationship_result_handler
+            )
 
-    if not success_linking_poll:
-        raise RuntimeError("Failed to register linking batch polling job - scheduler job registration is critical")
-    logger.info("Successfully registered linking batch polling job (1-minute interval)")
+        # Wrap with monitoring and timeout (45 seconds for a 1-minute interval job)
+        monitored_relationship_poll = ScheduledTaskMonitor.wrap_scheduled_job(
+            job_id="lt_memory_linking_batch_polling",
+            func=poll_relationship_batches_with_handler,
+            timeout_seconds=45,  # Kill if running longer than 45 seconds
+            kill_on_timeout=True
+        )
+
+        success_linking_poll = scheduler_service.register_job(
+            job_id="lt_memory_linking_batch_polling",
+            func=monitored_relationship_poll,
+            trigger=IntervalTrigger(minutes=1),
+            component="lt_memory",
+            description="Poll Anthropic Batch API for relationship results every 1 minute"
+        )
+
+        if not success_linking_poll:
+            raise RuntimeError("Failed to register linking batch polling job - scheduler job registration is critical")
+        logger.info("Successfully registered linking batch polling job (1-minute interval)")
+    else:
+        logger.info("Batch polling jobs skipped - no Anthropic Batch API client configured")
 
     # Register refinement job (7-day intervals)
     success_refinement = scheduler_service.register_job(
@@ -117,42 +121,45 @@ def register_lt_memory_jobs(scheduler_service, lt_memory_factory) -> bool:
         raise RuntimeError("Failed to register memory refinement job - scheduler job registration is critical")
     logger.info("Successfully registered memory refinement job (7-day interval)")
 
-    # Register consolidation job (7-day intervals)
-    def run_consolidation_for_all_users():
-        """Run consolidation for all users with consolidation enabled."""
-        try:
-            from utils.user_context import set_current_user_id, clear_user_context
-            db = lt_memory_factory.db
-            users = db.get_users_with_memory_enabled()
+    # Register consolidation job (7-day intervals) - requires BatchingService
+    if batching is not None:
+        def run_consolidation_for_all_users():
+            """Run consolidation for all users with consolidation enabled."""
+            try:
+                from utils.user_context import set_current_user_id, clear_user_context
+                db = lt_memory_factory.db
+                users = db.get_users_with_memory_enabled()
 
-            total_submitted = 0
-            for user in users:
-                user_id = str(user["id"])
-                set_current_user_id(user_id)
-                try:
-                    batch_id = batching.submit_consolidation_batch(user_id)
-                    if batch_id:
-                        total_submitted += 1
-                finally:
-                    clear_user_context()
+                total_submitted = 0
+                for user in users:
+                    user_id = str(user["id"])
+                    set_current_user_id(user_id)
+                    try:
+                        batch_id = batching.submit_consolidation_batch(user_id)
+                        if batch_id:
+                            total_submitted += 1
+                    finally:
+                        clear_user_context()
 
-            logger.info(f"Consolidation sweep: submitted batches for {total_submitted} users")
-            return {"users_processed": total_submitted}
-        except Exception as e:
-            logger.error(f"Error in consolidation sweep: {e}", exc_info=True)
-            return {"error": str(e)}
+                logger.info(f"Consolidation sweep: submitted batches for {total_submitted} users")
+                return {"users_processed": total_submitted}
+            except Exception as e:
+                logger.error(f"Error in consolidation sweep: {e}", exc_info=True)
+                return {"error": str(e)}
 
-    success_consolidation = scheduler_service.register_job(
-        job_id="lt_memory_consolidation",
-        func=run_consolidation_for_all_users,
-        trigger=IntervalTrigger(days=7),
-        component="lt_memory",
-        description="Submit consolidation batches for all users every 7 days"
-    )
+        success_consolidation = scheduler_service.register_job(
+            job_id="lt_memory_consolidation",
+            func=run_consolidation_for_all_users,
+            trigger=IntervalTrigger(days=7),
+            component="lt_memory",
+            description="Submit consolidation batches for all users every 7 days"
+        )
 
-    if not success_consolidation:
-        raise RuntimeError("Failed to register consolidation job - scheduler job registration is critical")
-    logger.info("Successfully registered consolidation job (7-day interval)")
+        if not success_consolidation:
+            raise RuntimeError("Failed to register consolidation job - scheduler job registration is critical")
+        logger.info("Successfully registered consolidation job (7-day interval)")
+    else:
+        logger.info("Consolidation job skipped - no BatchingService available")
 
     # Register temporal score recalculation job (daily intervals)
     def run_temporal_score_recalculation():

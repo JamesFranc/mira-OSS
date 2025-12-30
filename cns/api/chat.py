@@ -77,11 +77,22 @@ class ChatEndpoint(BaseHandler):
         # Check for HITL approval responses (before normal processing)
         # This allows users to approve/reject pending operations via chat
         import asyncio
+        import concurrent.futures
         from services.approval_interceptor import check_for_approval_response
 
-        approval_result = asyncio.get_event_loop().run_until_complete(
-            check_for_approval_response(user_id, msg)
-        )
+        # Run async code from sync context using a thread pool
+        # This avoids "event loop is already running" errors in FastAPI
+        def run_async():
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(check_for_approval_response(user_id, msg))
+            finally:
+                loop.close()
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(run_async)
+            approval_result = future.result(timeout=5.0)
+
         if approval_result is not None:
             approved, response_text = approval_result
             return APIResponse(

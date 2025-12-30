@@ -127,7 +127,8 @@ INSERT INTO internal_llm (name, model, endpoint_url, api_key_name, description) 
     ('execution', 'openai/gpt-oss-20b', 'https://api.groq.com/openai/v1/chat/completions', 'provider_key', 'Fast model for tool routing'),
     ('analysis', 'openai/gpt-oss-20b', 'https://api.groq.com/openai/v1/chat/completions', 'provider_key', 'Model for fingerprint generation and memory evacuation'),
     ('summary', 'claude-haiku-4-5', 'https://api.anthropic.com/v1/messages', 'anthropic_key', 'Model for segment summary generation'),
-    ('injection_defense', 'meta-llama/llama-3.1-8b-instruct', 'https://openrouter.ai/api/v1/chat/completions', 'provider_key', 'Model for prompt injection detection')
+    ('injection_defense', 'meta-llama/llama-3.1-8b-instruct', 'https://openrouter.ai/api/v1/chat/completions', 'provider_key', 'Model for prompt injection detection'),
+    ('extraction', 'anthropic/claude-3-haiku', 'https://openrouter.ai/api/v1/chat/completions', 'provider_key', 'Model for LT memory extraction')
 ON CONFLICT (name) DO NOTHING;
 
 GRANT SELECT ON internal_llm TO mira_dbuser;

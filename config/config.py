@@ -216,7 +216,7 @@ class ExtractionConfig(BaseModel):
         description="Token budget for extended thinking during extraction"
     )
     max_extraction_tokens: int = Field(
-        default=16000,
+        default=8000,
         description="Maximum tokens for extraction response"
     )
     extraction_temperature: float = Field(

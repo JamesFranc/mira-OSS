@@ -76,6 +76,10 @@ class LTMemoryFactory:
         The Batch API client is created internally using the api_key_name from
         config.batching. This isolates batch operations (memory extraction,
         relationship classification) from interactive chat API usage.
+
+        If the batch API key is not configured, batch-dependent services
+        (BatchingService, BatchCoordinator, result handlers) will be None,
+        and the system will use immediate execution instead of batch processing.
     """
 
     def __init__(
@@ -108,11 +112,18 @@ class LTMemoryFactory:
         self._llm_provider = llm_provider
         self._conversation_repo = conversation_repo
 
-        # Create dedicated Anthropic client for Batch API operations
-        # Separate from chat client to isolate rate limits and enable independent cost tracking
-        batch_api_key = get_api_key(config.batching.api_key_name)
-        self._batch_anthropic_client = anthropic.Anthropic(api_key=batch_api_key)
-        logger.info(f"Batch API client initialized with key '{config.batching.api_key_name}'")
+        # Create dedicated Anthropic client for Batch API operations (optional)
+        # If no batch API key configured, batch operations disabled - use immediate execution
+        self._batch_anthropic_client: Optional[anthropic.Anthropic] = None
+        try:
+            batch_api_key = get_api_key(config.batching.api_key_name)
+            if batch_api_key and batch_api_key.strip():
+                self._batch_anthropic_client = anthropic.Anthropic(api_key=batch_api_key)
+                logger.info(f"Batch API client initialized with key '{config.batching.api_key_name}'")
+            else:
+                logger.info("Batch API key is empty - batch operations disabled, using immediate execution")
+        except KeyError:
+            logger.info(f"Batch API key '{config.batching.api_key_name}' not configured - batch operations disabled")
 
         # Track initialization order for reverse cleanup
         self._service_init_order = []
@@ -219,13 +230,39 @@ class LTMemoryFactory:
             )
             self._service_init_order.append(self.extraction_orchestrator)
 
-            logger.debug("Initializing BatchCoordinator...")
-            self.batch_coordinator = BatchCoordinator(
-                config=self.config.batching,
-                db=self.db,
-                anthropic_client=self._batch_anthropic_client
-            )
-            self._service_init_order.append(self.batch_coordinator)
+            # Batch-dependent components - only initialize if Anthropic client available
+            if self._batch_anthropic_client is not None:
+                logger.debug("Initializing BatchCoordinator...")
+                self.batch_coordinator = BatchCoordinator(
+                    config=self.config.batching,
+                    db=self.db,
+                    anthropic_client=self._batch_anthropic_client
+                )
+                self._service_init_order.append(self.batch_coordinator)
+
+                logger.debug("Initializing result handlers...")
+                self.extraction_result_handler = ExtractionBatchResultHandler(
+                    anthropic_client=self._batch_anthropic_client,
+                    memory_processor=self.memory_processor,
+                    vector_ops=self.vector_ops,
+                    db=self.db,
+                    linking_service=self.linking,
+                    entity_extractor=self.entity_extractor
+                )
+                self._service_init_order.append(self.extraction_result_handler)
+
+                self.relationship_result_handler = RelationshipBatchResultHandler(
+                    anthropic_client=self._batch_anthropic_client,
+                    linking_service=self.linking,
+                    db=self.db
+                )
+                self._service_init_order.append(self.relationship_result_handler)
+            else:
+                # Set to None so callers know batch operations are unavailable
+                self.batch_coordinator = None
+                self.extraction_result_handler = None
+                self.relationship_result_handler = None
+                logger.info("Batch coordinator and result handlers disabled (no Anthropic client)")
 
             logger.debug("Initializing ConsolidationHandler...")
             self.consolidation_handler = ConsolidationHandler(
@@ -237,41 +274,28 @@ class LTMemoryFactory:
             logger.debug("Initializing EntityExtractor...")
             self.entity_extractor = EntityExtractor()
             self._service_init_order.append(self.entity_extractor)
-
-            logger.debug("Initializing result handlers...")
-            self.extraction_result_handler = ExtractionBatchResultHandler(
-                anthropic_client=self._batch_anthropic_client,
-                memory_processor=self.memory_processor,
-                vector_ops=self.vector_ops,
-                db=self.db,
-                linking_service=self.linking,
-                entity_extractor=self.entity_extractor
-            )
-            self._service_init_order.append(self.extraction_result_handler)
-
-            self.relationship_result_handler = RelationshipBatchResultHandler(
-                anthropic_client=self._batch_anthropic_client,
-                linking_service=self.linking,
-                db=self.db
-            )
-            self._service_init_order.append(self.relationship_result_handler)
         except Exception as e:
             raise RuntimeError(f"Failed to initialize processing components: {e}") from e
 
         try:
             # Layer 4: Higher-level services (depend on multiple services)
-            logger.debug("Initializing BatchingService...")
-            self.batching = BatchingService(
-                config=self.config.batching,
-                db=self.db,
-                extraction_service=self.extraction,
-                linking_service=self.linking,
-                vector_ops=self.vector_ops,
-                anthropic_client=self._batch_anthropic_client,
-                conversation_repo=self._conversation_repo,
-                llm_provider=self._llm_provider
-            )
-            self._service_init_order.append(self.batching)
+            # BatchingService requires Anthropic client for batch operations
+            if self._batch_anthropic_client is not None:
+                logger.debug("Initializing BatchingService...")
+                self.batching = BatchingService(
+                    config=self.config.batching,
+                    db=self.db,
+                    extraction_service=self.extraction,
+                    linking_service=self.linking,
+                    vector_ops=self.vector_ops,
+                    anthropic_client=self._batch_anthropic_client,
+                    conversation_repo=self._conversation_repo,
+                    llm_provider=self._llm_provider
+                )
+                self._service_init_order.append(self.batching)
+            else:
+                self.batching = None
+                logger.info("BatchingService disabled (no Anthropic client)")
         except Exception as e:
             raise RuntimeError(f"Failed to initialize BatchingService: {e}") from e
 

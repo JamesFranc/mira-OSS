@@ -222,10 +222,10 @@ class BatchExecutionStrategy(ExecutionStrategy):
 
 class ImmediateExecutionStrategy(ExecutionStrategy):
     """
-    Execute extraction immediately via OpenAI fallback.
+    Execute extraction immediately via configured LLM provider.
 
-    Used when Anthropic Batch API is unavailable (failover mode).
-    Executes synchronously and stores results immediately.
+    Uses internal_llm 'extraction' config for provider routing.
+    Falls back to default LLMProvider behavior if extraction config unavailable.
     """
 
     def __init__(
@@ -245,7 +245,9 @@ class ImmediateExecutionStrategy(ExecutionStrategy):
         chunks: List[ProcessingChunk]
     ) -> Optional[str]:
         """
-        Execute extraction immediately using OpenAI fallback.
+        Execute extraction immediately using configured LLM provider.
+
+        Uses internal_llm 'extraction' config for provider routing.
 
         Args:
             user_id: User ID
@@ -261,6 +263,10 @@ class ImmediateExecutionStrategy(ExecutionStrategy):
         total_memories_stored = 0
         all_linking_pairs = []
 
+        # Get extraction LLM routing config
+        from lt_memory import get_extraction_llm_kwargs
+        llm_routing = get_extraction_llm_kwargs()
+
         try:
             for chunk in chunks:
                 # Build extraction payload
@@ -272,12 +278,11 @@ class ImmediateExecutionStrategy(ExecutionStrategy):
                 if not payload.user_prompt:
                     continue
 
-                # Call LLM directly (routes to OpenAI fallback)
                 response = self.llm_provider.generate_response(
                     messages=[{"role": "user", "content": payload.user_prompt}],
                     system_override=payload.system_prompt,
-                    thinking_enabled=True,
-                    thinking_budget=1024
+                    thinking_enabled=False,
+                    **llm_routing
                 )
 
                 # Extract text from response

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from utils.user_credentials import UserCredentialService
-from config.config_manager import config_manager
+from config.config_manager import config
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +94,7 @@ def get_effective_auto_approve_commands(user_id: str) -> List[str]:
     """
     Get combined auto-approve commands from global config and user settings.
     """
-    global_patterns = config_manager.config.system_gateway.auto_approve_patterns
+    global_patterns = config.system_gateway.auto_approve_patterns
     user_settings = get_user_gateway_settings(user_id)
     
     # Combine and deduplicate
@@ -105,7 +105,7 @@ def get_effective_blocked_patterns(user_id: str) -> List[str]:
     """
     Get combined blocked patterns from global config and user settings.
     """
-    global_patterns = config_manager.config.system_gateway.blocked_patterns
+    global_patterns = config.system_gateway.blocked_patterns
     user_settings = get_user_gateway_settings(user_id)
     
     # Combine and deduplicate

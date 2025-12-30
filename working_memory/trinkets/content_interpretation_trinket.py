@@ -7,7 +7,7 @@ before the LLM describes content.
 
 This addresses the "Source ≠ Substance" problem: LLMs pattern-match on sender/source
 metadata and assume content type, then describe through that lens without verification.
-Example: DoorDash email assumed to be transaction when it's actually a newsletter.
+Example: Vendor email assumed to be transaction when it's actually a newsletter.
 """
 import json
 import logging

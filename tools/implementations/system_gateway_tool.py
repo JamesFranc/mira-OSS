@@ -148,15 +148,15 @@ class SystemGatewayTool(Tool):
     description = "Sandboxed filesystem and command execution"
     simple_description = "reads files and runs commands"
 
-    def __init__(self, user_id: str):
-        super().__init__(user_id)
+    def __init__(self):
+        super().__init__()
         self.logger = logging.getLogger(__name__)
         self._config = self._load_config()
 
     def _load_config(self) -> Dict[str, Any]:
         """Load gateway configuration."""
-        from config.config_manager import config_manager
-        cfg = config_manager.config.system_gateway
+        from config.config_manager import config
+        cfg = config.system_gateway
         return {
             "endpoint": cfg.endpoint,
             "default_timeout": cfg.default_timeout,

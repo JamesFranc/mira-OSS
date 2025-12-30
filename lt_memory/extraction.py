@@ -861,6 +861,10 @@ class ExtractionService:
             memory_context
         )
 
+        # Get extraction LLM routing config
+        from lt_memory import get_extraction_llm_kwargs
+        llm_routing = get_extraction_llm_kwargs()
+
         # Extraction with retry logic
         for attempt in range(self.config.retry_attempts + 1):
             try:
@@ -869,12 +873,12 @@ class ExtractionService:
                         {"role": "system", "content": self.extraction_system_prompt},
                         {"role": "user", "content": extraction_prompt}
                     ],
-                    model_override=self.config.extraction_model,
                     temperature=self.config.extraction_temperature,
                     max_tokens=self.config.max_extraction_tokens,
                     top_p=0.3,
                     frequency_penalty=0.5,
-                    response_format={"type": "json_object"}
+                    response_format={"type": "json_object"},
+                    **llm_routing
                 )
 
                 # Extract text content from response

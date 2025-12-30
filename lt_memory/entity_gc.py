@@ -404,6 +404,10 @@ Respond with JSON:
             logger.info(f"No GC review requests for user {user_id}")
             return {"merged": 0, "deleted": 0, "kept": 0, "errors": 0}
 
+        # Get extraction LLM routing config
+        from lt_memory import get_extraction_llm_kwargs
+        llm_routing = get_extraction_llm_kwargs()
+
         # Process each request synchronously (monthly job, can afford latency)
         results = {}
         for request in batch_payload["requests"]:
@@ -412,7 +416,8 @@ Respond with JSON:
                 system=request["params"]["system"],
                 temperature=request["params"]["temperature"],
                 max_tokens=request["params"]["max_tokens"],
-                response_format=request["params"].get("response_format")
+                response_format=request["params"].get("response_format"),
+                **llm_routing
             )
 
             response_text = self.llm_provider.extract_text_content(response)

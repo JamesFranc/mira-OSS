@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
-from config.config_manager import config_manager
+from config.config_manager import config
 from utils.timezone_utils import utc_now, format_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ class GatewayAuditLogger:
             log_dir: Directory for audit logs. Defaults to data/audit/
         """
         if log_dir is None:
-            log_dir = Path(config_manager.config.paths.data_dir) / "audit"
+            log_dir = Path(config.paths.data_dir) / "audit"
         
         self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)

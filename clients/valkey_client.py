@@ -366,6 +366,19 @@ class ValkeyClient:
         """Set key with expiration."""
         return self._client.setex(key, seconds, value)
 
+    # Set operations for HITL approval service
+    def sadd(self, key: str, *members) -> int:
+        """Add members to a set."""
+        return self._client.sadd(key, *members)
+
+    def smembers(self, key: str) -> set:
+        """Get all members of a set."""
+        return self._client.smembers(key)
+
+    def srem(self, key: str, *members) -> int:
+        """Remove members from a set."""
+        return self._client.srem(key, *members)
+
     def flush_except_whitelist(self, preserve_prefixes: list[str]) -> int:
         """
         Delete all keys from Valkey except those matching whitelist prefixes.

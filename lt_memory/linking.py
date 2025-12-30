@@ -271,6 +271,10 @@ Respond with JSON:
         # Build prompt
         user_prompt = self._build_relationship_prompt(source_memory, target_memory)
 
+        # Get extraction LLM routing config
+        from lt_memory import get_extraction_llm_kwargs
+        llm_routing = get_extraction_llm_kwargs()
+
         # Call LLM
         response = self.llm_provider.generate_response(
             messages=[
@@ -279,7 +283,8 @@ Respond with JSON:
             ],
             temperature=0.2,
             max_tokens=self.config.classification_max_tokens,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            **llm_routing
         )
 
         response_text = self.llm_provider.extract_text_content(response)

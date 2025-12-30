@@ -14,8 +14,7 @@ from .hitl_approval_service import (
     HITLApprovalService,
     ApprovalRequest,
     ApprovalStatus,
-    ApprovalDecision,
-    get_hitl_approval_service,
+    get_hitl_service,
 )
 from .gateway_audit_log import (
     GatewayAuditLogger,
@@ -24,11 +23,13 @@ from .gateway_audit_log import (
     get_audit_logger,
 )
 from .gateway_user_settings import (
-    GatewayUserSettingsService,
     GatewayUserSettings,
+    get_user_gateway_settings,
+    save_user_gateway_settings,
 )
 from .approval_interceptor import (
-    ApprovalInterceptor,
+    check_for_approval_response,
+    format_pending_approval_prompt,
 )
 
 __all__ = [
@@ -40,17 +41,18 @@ __all__ = [
     "HITLApprovalService",
     "ApprovalRequest",
     "ApprovalStatus",
-    "ApprovalDecision",
-    "get_hitl_approval_service",
+    "get_hitl_service",
     # Audit logging
     "GatewayAuditLogger",
     "OperationType",
     "AuditEntry",
     "get_audit_logger",
     # User settings
-    "GatewayUserSettingsService",
     "GatewayUserSettings",
+    "get_user_gateway_settings",
+    "save_user_gateway_settings",
     # Interceptor
-    "ApprovalInterceptor",
+    "check_for_approval_response",
+    "format_pending_approval_prompt",
 ]
 

@@ -339,6 +339,10 @@ Respond with JSON:
             memory_text=memory.text
         )
 
+        # Get extraction LLM routing config
+        from lt_memory import get_extraction_llm_kwargs
+        llm_routing = get_extraction_llm_kwargs()
+
         response = self.llm_provider.generate_response(
             messages=[
                 {"role": "system", "content": self.refinement_system_prompt},
@@ -346,7 +350,8 @@ Respond with JSON:
             ],
             temperature=0.1,
             max_tokens=self.config.refinement_max_tokens,
-            top_p=0.2
+            top_p=0.2,
+            **llm_routing
         )
 
         response_text = self.llm_provider.extract_text_content(response)
