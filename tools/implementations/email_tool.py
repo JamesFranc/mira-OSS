@@ -78,11 +78,21 @@ class EmailTool(Tool):
     
     name = "email_tool"
     simple_description = """
-    Email management tool that provides access to email accounts via IMAP/SMTP protocols. 
+    Email management tool that provides access to email accounts via IMAP/SMTP protocols.
     Use this tool to read, search, send, and manage emails.
+
+    IMPORTANT: This tool requires pre-configuration by the user through Settings > Tools before use.
+    Connection settings (email_address, password, imap_server, smtp_server, smtp_port, etc.) are
+    NOT passed as parameters to this tool - they must be configured separately by the user first.
+    If the tool returns a configuration error, inform the user they need to configure their email
+    account in Settings > Tools before you can access their email.
     """
     implementation_details = """
     OPERATIONS:
+    - check_status: Check if email tool is configured and can connect
+      Parameters: None
+      Returns: Configuration status and connection test result
+
     - get_emails: Retrieve emails from specified folder with options for filtering and content loading
       Parameters:
         folder (optional, default="INBOX"): Email folder to access
@@ -174,14 +184,14 @@ class EmailTool(Tool):
 
     anthropic_schema = {
         "name": "email_tool",
-        "description": "Email management tool that provides access to email accounts via IMAP/SMTP protocols. Use this tool to read, search, send, and manage emails.",
+        "description": "Email management tool that provides access to email accounts via IMAP/SMTP protocols. Use this tool to read, search, send, and manage emails. IMPORTANT: This tool requires pre-configuration by the user through Settings > Tools. Connection settings (email_address, password, imap_server, smtp_server, smtp_port, etc.) are NOT parameters - they must be configured by the user first. Use 'check_status' operation to verify if the tool is ready.",
         "input_schema": {
                 "type": "object",
                 "properties": {
                     "operation": {
                         "type": "string",
-                        "enum": ["get_emails", "get_email_content", "mark_as_read", "mark_as_unread", "delete_email", "move_email", "send_email", "reply_to_email", "create_draft", "search_emails", "list_folders", "mark_for_later_reply", "get_emails_for_later_reply"],
-                        "description": "The email operation to perform"
+                        "enum": ["check_status", "get_emails", "get_email_content", "mark_as_read", "mark_as_unread", "delete_email", "move_email", "send_email", "reply_to_email", "create_draft", "search_emails", "list_folders", "mark_for_later_reply", "get_emails_for_later_reply"],
+                        "description": "The email operation to perform. Use 'check_status' first to verify the tool is configured."
                     },
                     "folder": {
                         "type": "string",
@@ -432,7 +442,80 @@ class EmailTool(Tool):
         self.trash_folder = config.get("trash_folder", "Trash")
 
         self._config_loaded = True
-    
+
+    def _check_status(self) -> Dict[str, Any]:
+        """
+        Check if email tool is configured and can connect.
+
+        This method is designed to work even when not configured,
+        returning helpful status information for the LLM.
+
+        Returns:
+            Dictionary with configuration and connection status
+        """
+        import json
+        from utils.user_credentials import UserCredentialService
+
+        result = {
+            "configured": False,
+            "connected": False,
+            "email_address": None,
+            "imap_server": None,
+            "smtp_server": None,
+            "message": ""
+        }
+
+        # Check if configuration exists
+        try:
+            credential_service = UserCredentialService()
+            config_json = credential_service.get_credential(
+                credential_type="tool_config",
+                service_name="email_tool"
+            )
+
+            if not config_json:
+                result["message"] = (
+                    "Email tool is not configured. The user needs to configure their email account "
+                    "in Settings > Tools before you can access their email. They will need to provide: "
+                    "email address, password (app password for Gmail/Outlook), IMAP server, and SMTP server."
+                )
+                return result
+
+            config = json.loads(config_json)
+            required_fields = ["imap_server", "smtp_server", "email_address", "password"]
+            missing = [f for f in required_fields if not config.get(f)]
+
+            if missing:
+                result["message"] = (
+                    f"Email configuration is incomplete. Missing fields: {missing}. "
+                    "The user needs to update their email settings in Settings > Tools."
+                )
+                return result
+
+            result["configured"] = True
+            result["email_address"] = config.get("email_address")
+            result["imap_server"] = config.get("imap_server")
+            result["smtp_server"] = config.get("smtp_server")
+
+        except Exception as e:
+            result["message"] = f"Error checking configuration: {e}"
+            return result
+
+        # Try to connect
+        try:
+            if self._ensure_connected():
+                result["connected"] = True
+                result["message"] = "Email tool is configured and connected successfully."
+            else:
+                result["message"] = (
+                    "Email is configured but connection failed. The user may need to check their "
+                    "password or server settings in Settings > Tools."
+                )
+        except Exception as e:
+            result["message"] = f"Email is configured but connection failed: {e}"
+
+        return result
+
     @property
     def password(self):
         """Lazy-load email password from user credentials."""
@@ -1034,6 +1117,10 @@ class EmailTool(Tool):
         Raises:
             ValueError: If the operation is invalid or fails
         """
+        # Handle check_status BEFORE connection attempt so it works even when not configured
+        if operation == "check_status":
+            return self._check_status()
+
         try:
             # Ensure we're connected to the server
             if not self._ensure_connected():

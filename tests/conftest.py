@@ -8,7 +8,6 @@ import pytest
 # Import fixtures to make them available globally
 from tests.fixtures.reset import full_reset
 from tests.fixtures.isolation import *
-from tests.fixtures.auth import *
 from tests.fixtures.core import *
 
 

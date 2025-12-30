@@ -165,6 +165,7 @@ class CNSIntegrationFactory:
             from working_memory.trinkets.punchclock_trinket import PunchclockTrinket
             from working_memory.trinkets.domaindoc_trinket import DomaindocTrinket
             from working_memory.trinkets.getcontext_trinket import GetContextTrinket
+            from working_memory.trinkets.content_interpretation_trinket import ContentInterpretationTrinket
 
             # Trinkets self-register with working memory
             TimeManager(event_bus, self._working_memory)
@@ -175,6 +176,7 @@ class CNSIntegrationFactory:
             PunchclockTrinket(event_bus, self._working_memory)
             DomaindocTrinket(event_bus, self._working_memory)
             GetContextTrinket(event_bus, self._working_memory)
+            ContentInterpretationTrinket(event_bus, self._working_memory)
             
             logger.info("Event-driven working memory initialized with trinkets")
         return self._working_memory

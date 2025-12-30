@@ -23,7 +23,7 @@ class ApiConfig(BaseModel):
     api_key_name: str = Field(default="anthropic_key", description="Name of the Anthropic API key to retrieve from Vault")
 
     # Generation settings
-    max_tokens: int = Field(default=10000, description="Maximum number of tokens to generate in responses")
+    max_tokens: int = Field(default=8192, description="Maximum number of tokens to generate in responses")
     context_window_tokens: int = Field(default=200000, description="Total context window size in tokens for the model")
     temperature: float = Field(default=1.0, description="Temperature setting for response generation (Anthropic default: 1.0)")
 
