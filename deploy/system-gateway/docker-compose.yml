@@ -1,0 +1,81 @@
+# System Gateway - Docker Compose Configuration
+# Sandboxed execution environment with security hardening
+
+services:
+  system-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        USER_UID: 1000
+        USER_GID: 1000
+    
+    container_name: mira-system-gateway
+    
+    # Security hardening
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - SETUID
+      - SETGID
+    
+    # Read-only root filesystem with tmpfs for writable areas
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid
+      - /tmp/gateway:size=32m,mode=1777
+    
+    # Network isolation (disable for complete isolation)
+    # Set to 'bridge' if workspace operations need network access
+    network_mode: none
+    
+    # Resource limits
+    mem_limit: 512m
+    mem_reservation: 128m
+    cpus: 1
+    pids_limit: 100
+    
+    # Workspace volume mount
+    volumes:
+      - ${WORKSPACE_PATH:-~/mira-workspace}:/workspace:rw
+      # Optional: mount seccomp profile
+      # - ./seccomp-profile.json:/etc/seccomp-profile.json:ro
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+      # Uncomment to use custom seccomp profile
+      # - seccomp=/etc/seccomp-profile.json
+    
+    environment:
+      - GATEWAY_PORT=9500
+      - WORKSPACE_ROOT=/workspace
+      - LOG_LEVEL=INFO
+      # Blocked patterns (comma-separated)
+      - BLOCKED_PATTERNS=*.env,*.key,*.pem,.git/config,**/secrets/**
+    
+    ports:
+      - "9500:9500"
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9500/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Network-enabled variant for when workspace needs network
+  system-gateway-networked:
+    extends:
+      service: system-gateway
+    
+    container_name: mira-system-gateway-networked
+    network_mode: bridge
+    
+    profiles:
+      - networked
+

@@ -554,3 +554,52 @@ class ContextConfig(BaseModel):
         description="Number of oldest messages to prune when no topic drift boundary found"
     )
 
+
+class SystemGatewayConfig(BaseModel):
+    """
+    System Gateway configuration for sandboxed filesystem and command execution.
+
+    The System Gateway provides secure access to local filesystem operations
+    and shell command execution within an isolated Docker container.
+    """
+    enabled: bool = Field(
+        default=True,
+        description="Enable system gateway tool (requires running gateway container)"
+    )
+    endpoint: str = Field(
+        default="http://localhost:9500",
+        description="Gateway container HTTP endpoint"
+    )
+    workspace_path: str = Field(
+        default="~/mira-workspace",
+        description="Host path to mount as workspace in container"
+    )
+    default_timeout: int = Field(
+        default=30,
+        ge=1,
+        description="Default command timeout in seconds"
+    )
+    max_timeout: int = Field(
+        default=300,
+        ge=1,
+        description="Maximum allowed command timeout"
+    )
+    hitl_timeout: int = Field(
+        default=120,
+        ge=10,
+        description="HITL approval timeout in seconds"
+    )
+    auto_approve_patterns: List[str] = Field(
+        default_factory=lambda: [
+            "ls", "cat", "head", "tail", "grep", "find", "wc", "pwd", "echo",
+            "tree", "file", "stat", "du", "df"
+        ],
+        description="Command patterns that auto-approve without HITL"
+    )
+    blocked_patterns: List[str] = Field(
+        default_factory=lambda: [
+            "*.env", "*.key", "*.pem", ".git/config", "**/secrets/**"
+        ],
+        description="File patterns blocked from access"
+    )
+

@@ -21,7 +21,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 
 from config.config_manager import config
-from cns.api import data, actions, health, tool_config
+from cns.api import data, actions, health, tool_config, system_gateway
 from cns.api import chat as chat_api
 from api import federation as federation_api
 from cns.api.base import APIError, create_error_response, generate_request_id
@@ -503,6 +503,7 @@ def create_app() -> FastAPI:
     app.include_router(data.router, prefix="/v0/api", tags=["data"])
     app.include_router(actions.router, prefix="/v0/api", tags=["actions"])
     app.include_router(tool_config.router, prefix="/v0/api", tags=["tool_config"])
+    app.include_router(system_gateway.router, prefix="/v0/api", tags=["system-gateway"])
 
     # Root endpoint - friendly message for self-hosters
     @app.get("/")

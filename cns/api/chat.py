@@ -74,6 +74,25 @@ class ChatEndpoint(BaseHandler):
         # Sanitize text
         msg = sanitize_message_content(msg)
 
+        # Check for HITL approval responses (before normal processing)
+        # This allows users to approve/reject pending operations via chat
+        import asyncio
+        from services.approval_interceptor import check_for_approval_response
+
+        approval_result = asyncio.get_event_loop().run_until_complete(
+            check_for_approval_response(user_id, msg)
+        )
+        if approval_result is not None:
+            approved, response_text = approval_result
+            return APIResponse(
+                success=True,
+                data={
+                    "response": response_text,
+                    "approval_handled": True,
+                    "approved": approved
+                }
+            )
+
         # Validate and compress image if provided
         compressed: Optional[CompressedImage] = None
         if image:

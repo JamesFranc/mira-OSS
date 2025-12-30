@@ -22,6 +22,7 @@ from config.config import (
     DomainKnowledgeConfig,
     LatticeConfig,
     ContextConfig,
+    SystemGatewayConfig,
 )
 
 # Import the registry from tools package
@@ -41,6 +42,7 @@ class AppConfig(BaseModel):
     domain_knowledge: DomainKnowledgeConfig = Field(default_factory=DomainKnowledgeConfig)
     lattice: LatticeConfig = Field(default_factory=LatticeConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
+    system_gateway: SystemGatewayConfig = Field(default_factory=SystemGatewayConfig)
     
     # System prompt loaded once at startup
     system_prompt_text: str = Field(default="", exclude=True)
